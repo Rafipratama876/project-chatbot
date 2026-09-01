@@ -1,0 +1,7 @@
+node_modules/
+dist/
+proofs/
+*.tsbuildinfo
+.env
+storage/
+.swcrc.local
