@@ -93,6 +93,19 @@ export class ProofsController {
     return proof.sheetHtml ?? '<!doctype html><p>This proof has no sheet — it may have failed before assembly.</p>';
   }
 
+  @Get(':id/board')
+  @ApiOperation({
+    summary: 'The presentation board.',
+    description:
+      'Two scene panels, the §9.3 specifications, the logo elevation with its dimensions, '
+      + 'the section detail and the fabrication footer — as one image.',
+  })
+  async board(@Param('id') id: string, @Res() reply: FastifyReply) {
+    const proof = await this.proofs.findOne(id);
+    if (!proof.boardFile) throw new NotFoundException(`proof ${id} has no board`);
+    return reply.type('image/png').send(createReadStream(proof.boardFile));
+  }
+
   @Get(':id/panels/:name')
   @ApiOperation({ summary: 'One rendered panel.' })
   async panel(@Param('id') id: string, @Param('name') name: string, @Res() reply: FastifyReply) {

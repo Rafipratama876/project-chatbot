@@ -20,6 +20,7 @@ import { StorageModule } from './storage/storage.module.js';
 import { UploadsModule } from './uploads/uploads.module.js';
 import { WallPresetsModule } from './wall-presets/wall-presets.module.js';
 import { DesignsModule } from './designs/designs.module.js';
+import { CompatModule } from './compat/compat.module.js';
 
 /**
  * Module graph:
@@ -58,6 +59,7 @@ import { DesignsModule } from './designs/designs.module.js';
     UploadsModule,
     WallPresetsModule,
     DesignsModule,
+    CompatModule,
     HealthModule,
   ],
 })

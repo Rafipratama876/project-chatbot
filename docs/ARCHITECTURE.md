@@ -7,16 +7,17 @@ src/
     geometry/            Offset Path, stroke measurement, counters, §3.2, §3.5, §3.6
     engine/              Gates, trace, precedence, all 56 rules
     render/              §9.2 contract, three.js scene, day/night lighting
-    output/              §9.3 spec block, §9.4 disclosures, proof assembly
+    output/              §9.3 spec block, §9.4 disclosures, board + proof assembly
 
   modules/               ← NestJS. Supplies ports, persistence and transport.
     database/            TypeORM entities, migration, pgvector columns
     knowledge/           Thresholds (exact) + Appendix A/B & design refs (retrieval)
     llm/                 The four bounded nodes
     engine/              Assembles the ports from DI and calls into src/kb
-    render/              Pooled Chromium + esbuild bundle of src/kb/render
-    graph/               LangGraph: validate → draw → assemble → revise
+    render/              three.js capture, AI scene edits, Chromium board capture
+    graph/               LangGraph: validate → draw → compose → assemble → revise
     proofs/              Controller, service, DTOs
+    compat/              TSP session facade: Project JSON → measured JobInput
     queues/              BullMQ worker for renders
     health/
 ```
@@ -36,12 +37,36 @@ back.
 So the dependency arrow points one way. Nest supplies the ports — thresholds
 from Postgres, judgment from a model, pixels from a browser — and calls in.
 
+## Project JSON is the source of truth
+
+The TSP compatibility facade follows the same boundary for design input:
+
+```
+Project JSON → fieldName bindings → rule engine → three.js → board → proof
+```
+
+`signDetails[0].fieldInputs[]` carries each dynamic field's stable `fieldName`,
+source `fieldId`, display title, value, type, options and optional guidance. The
+facade binds fabrication semantics by `fieldName`, never by a mutable display
+title or free-form `aiMetadata`. Unknown fields remain structured customer
+intent and reach the proof disclosures rather than being dropped.
+
+The Project placement state remains authoritative for logo position, measured
+size and aspect ratio. The facade scales its canvas coordinates to the actual
+downloaded wall raster, traces the exact supplied logo once, and then gives the
+result to the rule engine. AI may interpret a revision or an explicitly custom
+choice. Post-render AI may change photographic materials, lighting, reflections,
+wall interaction, shadows and perspective, but it may not alter artwork, text,
+geometry, dimensions, colours, proportions, camera framing or construction.
+Each scene edit receives its canonical three.js view capture rather than another
+AI-generated panel.
+
 ## Module graph
 
 ```
    Proofs ──► Graph ──► Engine ──► Knowledge (thresholds, exact lookup)
       │          │          └────► Llm       (CL-R-54, §1.2/§7.1 ports)
-      │          ├──► Render     (three.js — no model call anywhere)
+       │          ├──► Render     (three.js seed → independent AI scene edits)
       │          └──► Llm        (§9.4 wording, revision → form patch)
       ├──► Knowledge  (design references, advisory)
       └──► Queues     (BullMQ, one Chromium page per concurrent job)
@@ -50,19 +75,24 @@ from Postgres, judgment from a model, pixels from a browser — and calls in.
 ## LangGraph
 
 ```
-   validate ──► draw ──► assemble ──┬──► END
-      ▲                             │
-      └────────── revise ◄──────────┘
+   validate ──► draw ──► compose ──► assemble ──┬──► END
+      ▲                                        │
+      └──────────────── revise ◄───────────────┘
 ```
 
-Four nodes. `validate` is one call into a pure function; `draw` is three.js.
-LangGraph earns its place on one edge: **revise**.
+Five nodes. `validate` is one call into a pure function; `draw` is three.js;
+`compose` independently produces or reuses the day/night scene panels, builds
+the deterministic HTML board, and captures it at 1536 x 951. LangGraph earns its
+place on one edge: **revise**.
 
 A revision patches the intake **form** and re-enters at `validate`, so all six
 gates run again. Patching the spec directly would produce a spec no gate had
 validated — and since §9.4's disclosures are derived from the trace, the proof
 would then carry a disclosure list describing decisions the spec no longer
 matches. `ProofsService.revise` creates a new proof row for the same reason.
+Keyword-scoped visual revisions regenerate only the affected scene panel;
+ambiguous or combined requests regenerate both. Reused panels retain their seed
+digest, making reuse and canonical-seed provenance inspectable.
 
 Two conditional edges carry the rest of the routing:
 
@@ -134,3 +164,18 @@ of guessing — which is exactly what the KB asks for:
 > Custom → resolve from Additional Information. **Cannot resolve → escalate.**
 
 `GET /api/v1/health` reports it as `"llmNodes": "disabled (judgments escalate)"`.
+
+## Post-render AI
+
+`AI_RENDER_ENABLED=true` runs each completed three.js panel through an OpenAI
+image edit before persistence. The three.js PNG is the sole authoritative image
+input. The prompt permits photorealistic material, light, shadow, reflection,
+and wall-integration improvements while locking glyphs, logo contours, sign
+components, colors, fabrication geometry, placement, scale, camera, crop, and
+canvas dimensions. Day and night edits run concurrently from canonical captures
+of the same validated scene. A failed edit falls back to that deterministic render rather than losing
+the proof. HTML, not the image model, supplies all board specifications,
+dimensions, labels and construction details.
+
+This stage is independent of `LLM_ENABLED`: Anthropic handles the four bounded
+judgment nodes; OpenAI handles only the final visual realism pass.

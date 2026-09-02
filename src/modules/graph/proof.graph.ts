@@ -8,6 +8,8 @@ import type { Threshold } from '#/kb/domain/thresholds.js';
 import { assembleProof, type Proof } from '#/kb/output/proof.js';
 import { EngineService } from '#/modules/engine/engine.service.js';
 import { RenderService, type RenderedProofPanel } from '#/modules/render/render.service.js';
+import { BoardService, type ScenePanel } from '#/modules/render/board.service.js';
+import type { ScenePanelKind } from '#/modules/render/ai-render.service.js';
 import { CalloutWriterService } from '#/modules/llm/callout-writer.service.js';
 import { RevisionPatchService } from '#/modules/llm/revision-patch.service.js';
 import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
@@ -15,21 +17,28 @@ import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
 /**
  * Orchestration.
  *
- *   validate ──► draw ──► assemble ──┬──► END
- *      ▲                             │
- *      └────────── revise ◄──────────┘
+ *   validate ──► draw ──► compose ──► assemble ──┬──► END
+ *      ▲                                         │
+ *      └───────────────── revise ◄───────────────┘
  *
  * LangGraph sequences the stages and carries the revision loop. It does not
  * draw the sign and it does not decide anything the KB decides — `validate` is
- * one call into a pure function, and `draw` is three.js.
+ * one call into a pure function, `draw` is three.js, and `board` is the
+ * photorealism pass over that render plus the HTML page it is placed on.
+ *
+ * `draw` and `board` are separate nodes because they have different costs and
+ * different reasons to re-run. Three.js is cheap and re-runs whenever the spec
+ * changes; the image model is slow and paid, and re-runs only for the panels a
+ * revision actually affects.
  *
  * The revision edge is the reason this is a graph rather than a promise chain:
  * a revision goes back to the FORM and re-enters at `validate`, so every gate
  * runs again. Patching the spec directly would produce a spec no gate had
  * validated, which is the one thing the rule engine exists to prevent.
  *
- * Node names differ from state channel names (`validate`/`draw`/`assemble` vs
- * `spec`/`panels`/`proof`) because LangGraph rejects a collision between them.
+ * Node names differ from state channel names (`validate`/`draw`/`compose`/
+ * `assemble` vs `spec`/`panels`/`board`/`proof`) because LangGraph rejects a
+ * collision between them.
  */
 const ProofState = Annotation.Root({
   job: Annotation<JobInput>(),
@@ -37,6 +46,9 @@ const ProofState = Annotation.Root({
   trace: Annotation<TraceLog | null>({ reducer: (_, b) => b, default: () => null }),
   unverified: Annotation<Threshold[]>({ reducer: (_, b) => b, default: () => [] }),
   panels: Annotation<RenderedProofPanel[]>({ reducer: (_, b) => b, default: () => [] }),
+  /** The delivered board, and the scene panels it was composed from. */
+  board: Annotation<string | null>({ reducer: (_, b) => b, default: () => null }),
+  scenePanels: Annotation<ScenePanel[]>({ reducer: (_, b) => b, default: () => [] }),
   proof: Annotation<Proof | null>({ reducer: (_, b) => b, default: () => null }),
   revisionRequest: Annotation<string | null>({ reducer: (_, b) => b, default: () => null }),
   revisionLog: Annotation<string[]>({ reducer: (a, b) => [...a, ...b], default: () => [] }),
@@ -50,6 +62,14 @@ export interface GraphRunOptions {
   deterministicOnly?: boolean;
   maxRevisions?: number;
   outDir?: string;
+  /** Skip the board — the rules-only paths (CLI preview, tests) do not need it. */
+  skipBoard?: boolean;
+  /** Free-text intent for the scene panels, on a revision. */
+  intent?: string | null;
+  /** Scene panels from the previous version, reused where the seed is unchanged. */
+  previousScenePanels?: ScenePanel[];
+  /** Which scene panels this revision affects. Defaults to both. */
+  regenerateScenePanels?: ScenePanelKind[];
 }
 
 @Injectable()
@@ -60,6 +80,7 @@ export class ProofGraph {
     private readonly config: ConfigService,
     private readonly engine: EngineService,
     private readonly render: RenderService,
+    private readonly board: BoardService,
     private readonly callouts: CalloutWriterService,
     private readonly revisions: RevisionPatchService,
     private readonly anthropic: AnthropicClient,
@@ -95,6 +116,26 @@ export class ProofGraph {
         }
       })
 
+      .addNode('compose', async (s) => {
+        if (options.skipBoard || !s.spec || s.spec.blocked || s.panels.length === 0) return {};
+        try {
+          const result = await this.board.compose({
+            spec: s.spec,
+            panels: s.panels,
+            intent: options.intent,
+            previous: options.previousScenePanels,
+            regenerate: options.regenerateScenePanels,
+          });
+          return { board: result.dataUrl, scenePanels: result.panels };
+        } catch (error) {
+          // The board is how the proof is delivered, not what it says. A
+          // failure here leaves the spec, the trace and the panels intact.
+          const message = error instanceof Error ? error.message : String(error);
+          this.logger.error(`board failed for ${s.job.jobId}: ${message}`);
+          return { renderError: s.renderError ?? message };
+        }
+      })
+
       .addNode('assemble', async (s) => {
         if (!s.spec || !s.trace) return {};
         let proof = assembleProof(s.spec, s.trace, {
@@ -112,6 +153,7 @@ export class ProofGraph {
         if (s.renderError) {
           proof = { ...proof, problems: [...proof.problems, `render failed: ${s.renderError}`] };
         }
+        if (s.board) proof = { ...proof, board: s.board };
         return { proof };
       })
 
@@ -153,7 +195,8 @@ export class ProofGraph {
       .addConditionalEdges('validate', (s) => (s.spec?.blocked ? 'assemble' : 'draw'), {
         draw: 'draw', assemble: 'assemble',
       })
-      .addEdge('draw', 'assemble')
+      .addEdge('draw', 'compose')
+      .addEdge('compose', 'assemble')
       .addConditionalEdges('assemble', (s) => (s.revisionRequest ? 'revise' : END), {
         revise: 'revise', [END]: END,
       })

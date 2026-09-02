@@ -9,10 +9,13 @@ import { VendorReferenceEntity } from './entities/vendor-reference.entity.js';
 import { DesignReferenceEntity } from './entities/design-reference.entity.js';
 import { DesignEntity, DesignMessageEntity } from './entities/design.entity.js';
 import { WallPresetEntity } from './entities/wall-preset.entity.js';
+import { CompatMessageEntity, CompatSessionEntity } from './entities/compat-session.entity.js';
 import { InitialSchema1735689600000 } from './migrations/1735689600000-InitialSchema.js';
 import { ProofSheet1735776000000 } from './migrations/1735776000000-ProofSheet.js';
 import { Designs1735862400000 } from './migrations/1735862400000-Designs.js';
 import { SignBoxHeight1735880000000 } from './migrations/1735880000000-SignBoxHeight.js';
+import { CompatSessions1735966400000 } from './migrations/1735966400000-CompatSessions.js';
+import { ProofBoard1736052800000 } from './migrations/1736052800000-ProofBoard.js';
 
 export const ENTITIES = [
   ThresholdEntity,
@@ -23,6 +26,8 @@ export const ENTITIES = [
   DesignEntity,
   DesignMessageEntity,
   WallPresetEntity,
+  CompatSessionEntity,
+  CompatMessageEntity,
 ];
 
 export const MIGRATIONS = [
@@ -30,6 +35,8 @@ export const MIGRATIONS = [
   ProofSheet1735776000000,
   Designs1735862400000,
   SignBoxHeight1735880000000,
+  CompatSessions1735966400000,
+  ProofBoard1736052800000,
 ];
 
 // The Nest app loads .env through ConfigModule, but the migration CLI never

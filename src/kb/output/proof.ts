@@ -44,6 +44,12 @@ export interface Proof {
   hardStop: string;
   /** The full sheet — §9.3, §9.4, both views, elevation and section. */
   sheetHtml: string;
+  /**
+   * The presentation board, as a data URL. This is the single image a customer
+   * is shown; the sheet is the long-form record behind it. Absent when the
+   * board was skipped or a job was blocked before anything was drawn.
+   */
+  board?: string;
 }
 
 export interface AssembleOptions {

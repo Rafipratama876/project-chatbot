@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { ProofGraph } from '#/modules/graph/proof.graph.js';
 import { EngineService } from '#/modules/engine/engine.service.js';
 import { RenderService } from '#/modules/render/render.service.js';
+import { BoardService } from '#/modules/render/board.service.js';
 import { CalloutWriterService } from '#/modules/llm/callout-writer.service.js';
 import { RevisionPatchService } from '#/modules/llm/revision-patch.service.js';
 import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
@@ -18,6 +19,7 @@ import type { JobInput } from '#/kb/domain/spec.js';
 
 const build = async (overrides: {
   render?: ReturnType<typeof vi.fn>;
+  compose?: ReturnType<typeof vi.fn>;
   llmEnabled?: boolean;
   blocked?: boolean;
 }) => {
@@ -25,6 +27,12 @@ const build = async (overrides: {
     { label: 'day · front elevation', view: 'day' as const, camera: 'front-elevation', file: '/tmp/day.png' },
     { label: 'night · front elevation', view: 'night' as const, camera: 'front-elevation', file: '/tmp/night.png' },
   ]);
+
+  const compose = overrides.compose ?? vi.fn(async () => ({
+    dataUrl: 'data:image/png;base64,Ym9hcmQ=',
+    html: '<main class="proof-board"></main>',
+    panels: [{ kind: 'day', dataUrl: 'data:image/png;base64,ZA==', engine: 'ai', seedHash: 'aaa' }],
+  }));
 
   const moduleRef = await Test.createTestingModule({
     providers: [
@@ -40,6 +48,7 @@ const build = async (overrides: {
         },
       },
       { provide: RenderService, useValue: { render } },
+      { provide: BoardService, useValue: { compose } },
       { provide: CalloutWriterService, useValue: { rewrite: async (_s: unknown, b: unknown) => b } },
       { provide: RevisionPatchService, useValue: { toPatch: vi.fn() } },
       { provide: AnthropicClient, useValue: { enabled: overrides.llmEnabled ?? false, minConfidence: 0.75 } },
@@ -47,7 +56,7 @@ const build = async (overrides: {
     ],
   }).compile();
 
-  return { graph: moduleRef.get(ProofGraph), render };
+  return { graph: moduleRef.get(ProofGraph), render, compose };
 };
 
 describe('ProofGraph', () => {
@@ -64,10 +73,12 @@ describe('ProofGraph', () => {
   it('a blocked job skips the renderer entirely', async () => {
     // CL-R-46 is the only blocking rule. A picture of a sign that cannot be
     // built is the worst possible output, so the edge routes around `draw`.
-    const { graph, render } = await build({ blocked: true });
+    const { graph, render, compose } = await build({ blocked: true });
     const state = await graph.run({ ...heavenCrepes(), jobId: 'blocked-job' });
 
     expect(render).not.toHaveBeenCalled();
+    // And nothing is paid for: the board is where the image model is called.
+    expect(compose).not.toHaveBeenCalled();
     expect(state.panels).toEqual([]);
     expect(state.proof).not.toBeNull();
     // The spec block and the disclosures still exist — that is what a human acts on.
@@ -83,6 +94,30 @@ describe('ProofGraph', () => {
     expect(state.proof!.problems.some((p) => p.includes('swiftshader unavailable'))).toBe(true);
     // §9.1 also notices the missing views rather than shipping a half proof.
     expect(state.proof!.problems.some((p) => p.includes('§9.1'))).toBe(true);
+  });
+
+  it('composes the board from the rendered panels and carries it on the proof', async () => {
+    const { graph, compose } = await build({});
+    const state = await graph.run({ ...heavenCrepes(), jobId: 'board-job' });
+
+    expect(compose).toHaveBeenCalledOnce();
+    // The board edits the three.js panels; it never sees the spec's numbers as
+    // an instruction, only as the render they already produced.
+    expect(compose.mock.calls[0]![0]).toMatchObject({ panels: state.panels });
+    expect(state.board).toBe('data:image/png;base64,Ym9hcmQ=');
+    expect(state.proof!.board).toBe('data:image/png;base64,Ym9hcmQ=');
+  });
+
+  it('a board failure still yields the proof and its panels', async () => {
+    // The board is delivery, not truth. Losing it must not lose the spec.
+    const compose = vi.fn(async () => { throw new Error('chromium unavailable'); });
+    const { graph } = await build({ compose });
+    const state = await graph.run({ ...heavenCrepes(), jobId: 'board-fail' });
+
+    expect(state.spec).not.toBeNull();
+    expect(state.panels.length).toBeGreaterThan(0);
+    expect(state.board).toBeNull();
+    expect(state.proof!.problems.some((p) => p.includes('chromium unavailable'))).toBe(true);
   });
 
   it('skipRender is distinguishable from a renderer that produced nothing', async () => {

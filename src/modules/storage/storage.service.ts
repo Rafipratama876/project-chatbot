@@ -126,8 +126,36 @@ export class StorageService {
       const decoded = jpeg.decode(buffer, { useTArray: true, maxMemoryUsageInMB: 1024 });
       return { width: decoded.width, height: decoded.height };
     }
+    if (/webp/i.test(mime)) return measureWebp(buffer);
     throw new BadRequestException(
-      `Cannot measure a "${mime}" image. Upload the wall photograph as PNG or JPEG.`,
+      `Cannot measure a "${mime}" image. Upload the wall photograph as PNG, JPEG, or WebP.`,
     );
   }
+}
+
+function measureWebp(buffer: Buffer): ImageSize {
+  if (buffer.length < 30 || buffer.toString('ascii', 0, 4) !== 'RIFF'
+    || buffer.toString('ascii', 8, 12) !== 'WEBP') {
+    throw new BadRequestException('The WebP image header is invalid or truncated.');
+  }
+  const format = buffer.toString('ascii', 12, 16);
+  if (format === 'VP8X') {
+    return {
+      width: 1 + buffer.readUIntLE(24, 3),
+      height: 1 + buffer.readUIntLE(27, 3),
+    };
+  }
+  if (format === 'VP8L' && buffer[20] === 0x2f) {
+    return {
+      width: 1 + buffer[21]! + ((buffer[22]! & 0x3f) << 8),
+      height: 1 + (buffer[22]! >> 6) + (buffer[23]! << 2) + ((buffer[24]! & 0x0f) << 10),
+    };
+  }
+  if (format === 'VP8 ' && buffer.toString('hex', 23, 26) === '9d012a') {
+    return {
+      width: buffer.readUInt16LE(26) & 0x3fff,
+      height: buffer.readUInt16LE(28) & 0x3fff,
+    };
+  }
+  throw new BadRequestException(`Unsupported WebP encoding "${format.trim()}".`);
 }

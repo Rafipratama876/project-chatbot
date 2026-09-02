@@ -60,6 +60,24 @@ export class ProofEntity {
   @Column({ name: 'sheet_html', type: 'text', nullable: true })
   sheetHtml!: string | null;
 
+  /** Path to the delivered presentation board PNG. */
+  @Column({ name: 'board_file', type: 'text', nullable: true })
+  boardFile!: string | null;
+
+  /**
+   * The scene panels the board was composed from, with the digest of the
+   * three.js capture behind each. A revision reuses a panel whose seed has not
+   * changed rather than paying for the same image twice.
+   */
+  @Column({ name: 'scene_panels', type: 'jsonb', default: () => "'[]'::jsonb" })
+  scenePanels!: Array<{
+    kind: 'day' | 'night';
+    dataUrl: string;
+    engine: 'ai' | 'render';
+    seedHash: string;
+    note?: string | null;
+  }>;
+
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
   panels!: Array<{
     label: string; view: string; camera: string; file: string;

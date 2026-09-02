@@ -6,4 +6,6 @@ export default registerAs('app', () => ({
   apiPrefix: process.env.API_PREFIX ?? 'api',
   /** Where rendered proof panels are written. */
   proofDir: process.env.PROOF_DIR ?? './storage/proofs',
+  /** Origin used in image URLs returned to external TSP clients. */
+  publicUrl: process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 3000}`,
 }));

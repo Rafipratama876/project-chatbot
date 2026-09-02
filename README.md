@@ -192,6 +192,15 @@ The CLI prints the spec block and disclosures without touching the database;
 `LLM_ENABLED=false` is the default and a supported state: all 56 rules run, and
 the two judgment points escalate rather than guess.
 
+`AI_RENDER_ENABLED=true` adds the final image-model stage used by the chatbot:
+canonical three.js view captures are sent to OpenAI as the authoritative edit
+inputs for concurrent day and night photorealism passes. Both captures come from
+the same validated scene, so one AI edit can never become another's input. Set
+`OPENAI_API_KEY`; this incurs
+one image call per generated scene panel. The resulting scenes are placed in a
+deterministic 1536 x 951 HTML board and captured by Chromium; specifications,
+dimensions, labels and construction details are never image-generated.
+
 ### API
 
 | | |
@@ -206,6 +215,7 @@ the two judgment points escalate rather than guess.
 | `POST /api/v1/knowledge/thresholds/:key` | Correct one. Returns the proofs that used the old value. |
 | `GET /api/v1/knowledge/vendor?q=` | Appendix A/B retrieval (pgvector, full-text fallback). |
 | `GET /api/v1/proofs/:id/sheet` | The printable proof sheet. |
+| `GET /api/v1/proofs/:id/board` | The composed 1536 x 951 presentation board PNG. |
 | `POST /api/v1/artwork/import` | SVG, PNG or JPEG → measured geometry, with provenance. |
 | `POST /api/v1/artwork/place` | Size the mark against a calibrated photo. |
 | `GET /api/v1/knowledge/options` | The form values §1.2 and §7.1 accept. |

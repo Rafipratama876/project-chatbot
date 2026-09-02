@@ -1,12 +1,16 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
 import { Repository, DataSource } from 'typeorm';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { ProofEntity } from '#/modules/database/entities/proof.entity.js';
 import { ThresholdReadEntity } from '#/modules/database/entities/threshold-read.entity.js';
 import { ProofGraph, type GraphRunOptions } from '#/modules/graph/proof.graph.js';
 import { DesignReferenceService } from '#/modules/knowledge/design-reference.service.js';
 import { RevisionPatchService } from '#/modules/llm/revision-patch.service.js';
 import { EngineService } from '#/modules/engine/engine.service.js';
+import { scopeFromIntent } from '#/modules/render/board.service.js';
 import type { JobInput } from '#/kb/domain/spec.js';
 import { KB_VERSION } from '#/kb/domain/boilerplate.js';
 
@@ -21,6 +25,7 @@ export class ProofsService {
     private readonly designRefs: DesignReferenceService,
     private readonly revisions: RevisionPatchService,
     private readonly engine: EngineService,
+    private readonly config: ConfigService,
   ) {}
 
   /** Creates the row, then runs the pipeline into it. */
@@ -77,7 +82,29 @@ export class ProofsService {
       );
     }
 
-    return this.create({ ...previous.job, form: patch.form });
+    // The previous scene panels come along so the board can reuse the ones this
+    // revision does not touch. Which panels it does touch is decided by whether
+    // their three.js seed moved: a form change that alters the sign produces a
+    // different render, and a different render is never reused.
+    return this.create({ ...previous.job, form: patch.form }, {
+      intent: request,
+      previousScenePanels: previous.scenePanels,
+    });
+  }
+
+  /**
+   * A look-only revision: the sign is unchanged, so no rule re-runs and no new
+   * three.js capture is taken. Only the scene panels are edited.
+   */
+  async reviseAppearance(id: string, request: string, panels?: Array<'day' | 'night'>): Promise<ProofEntity> {
+    const previous = await this.findOne(id);
+    return this.create(previous.job, {
+      intent: request,
+      previousScenePanels: previous.scenePanels,
+      // A request that names one view only pays for that view; the other is
+      // reused byte for byte, which also keeps it from drifting.
+      regenerateScenePanels: panels ?? scopeFromIntent(request),
+    });
   }
 
   async findOne(id: string): Promise<ProofEntity> {
@@ -88,6 +115,14 @@ export class ProofsService {
 
   async findByJob(jobId: string): Promise<ProofEntity[]> {
     return this.proofs.find({ where: { jobId }, order: { createdAt: 'DESC' } });
+  }
+
+  async findByJobPrefix(prefix: string): Promise<ProofEntity[]> {
+    return this.proofs
+      .createQueryBuilder('p')
+      .where('p.job_id LIKE :prefix', { prefix: `${prefix}%` })
+      .orderBy('p.created_at', 'DESC')
+      .getMany();
   }
 
   /** Every proof whose trace contains a given rule — the post-mortem query. */
@@ -105,11 +140,15 @@ export class ProofsService {
     state: Awaited<ReturnType<ProofGraph['run']>>,
     job: JobInput,
   ): Promise<ProofEntity> {
-    const { spec, trace, proof, panels, unverified } = state;
+    const { spec, trace, proof, panels, unverified, board, scenePanels } = state;
     if (!spec || !trace || !proof) {
       await this.proofs.update(id, { status: 'failed', errorMessage: 'pipeline produced no proof' });
       return this.findOne(id);
     }
+
+    // The board is written beside the panels it was composed from, so a proof
+    // is one directory on disk rather than a row with megabytes of base64 in it.
+    const boardFile = board ? await this.writeBoard(job.jobId, board) : null;
 
     await this.dataSource.transaction(async (manager) => {
       // Loaded and saved rather than `update`d: the jsonb columns hold the
@@ -127,6 +166,8 @@ export class ProofsService {
       // regenerated on demand from them.
       row.panels = panels.map(({ label, view, camera, file, note }) => ({ label, view, camera, file, note }));
       row.sheetHtml = proof.sheetHtml;
+      row.boardFile = boardFile;
+      row.scenePanels = scenePanels;
       row.problems = proof.problems;
       row.blocked = spec.blocked;
       row.escalations = spec.escalations;
@@ -153,6 +194,15 @@ export class ProofsService {
     }
 
     return this.findOne(id);
+  }
+
+  private async writeBoard(jobId: string, dataUrl: string): Promise<string> {
+    const baseDir = this.config.get<string>('app.proofDir') ?? './storage/proofs';
+    const dir = path.join(baseDir, jobId);
+    await fs.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${jobId}-board.png`);
+    await fs.writeFile(file, Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64'));
+    return file;
   }
 
   /** Re-runs the engine without persisting — used by the dry-run endpoint. */
