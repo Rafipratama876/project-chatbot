@@ -62,9 +62,17 @@ export class ProofEntity {
 
   @Column({ type: 'jsonb', default: () => "'[]'::jsonb" })
   panels!: Array<{
-    label: string; view: string; camera: string; file: string;
+    label: string; view: string; camera: string;
+    /** The deterministic render. Always present, always the source of truth. */
+    file: string;
     /** Set when the panel could not use the customer's photograph. */
     note?: string | null;
+    /**
+     * A presentation-only variant with a generatively rendered ground. Stored
+     * beside the base, never instead of it, so a bad enhancement can never
+     * cost the design.
+     */
+    enhanced?: { file: string; reason: string } | null;
   }>;
 
   /** Non-empty means the proof failed its own output contract and must not ship. */

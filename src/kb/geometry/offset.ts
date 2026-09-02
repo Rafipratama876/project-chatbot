@@ -54,9 +54,26 @@ const polyArea = (pts: { x: number; y: number }[]): number => {
 };
 
 /** Raw offset by `delta` inches per side (positive grows the solid). */
-export function offsetContours(contours: Contour[], delta: number, joinRound = true): Contour[] {
+export function offsetContours(
+  contours: Contour[],
+  delta: number,
+  joinRound = true,
+  /**
+   * How far a round join may deviate from a true arc, in inches.
+   *
+   * 1/4″ is right for a fabrication outline: it is well inside the tolerance
+   * anything is cut to, and a coarser polygon keeps `measureStroke` — which is
+   * quadratic in segment count — from crawling.
+   *
+   * It is far too coarse for anything drawn as light. A halo offset several
+   * inches out has its arcs approximated to a quarter inch, and the result is
+   * visibly faceted: the stepped edge on a night render was this number, not
+   * the shell count.
+   */
+  arcTolerance = 0.25,
+): Contour[] {
   if (delta === 0) return contours.map((c) => ({ ...c, points: [...c.points] }));
-  const co = new ClipperLib.ClipperOffset(2, 0.25 * CLIPPER_SCALE);
+  const co = new ClipperLib.ClipperOffset(2, arcTolerance * CLIPPER_SCALE);
   co.AddPaths(
     toClipper(contours),
     joinRound ? ClipperLib.JoinType.jtRound : ClipperLib.JoinType.jtMiter,

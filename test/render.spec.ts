@@ -14,6 +14,7 @@ import { ringAround } from '#/kb/geometry/offset.js';
 import { heavenCrepes, haloFlush, nonLitTagline } from './fixtures/jobs.js';
 import { logoMark } from './fixtures/blockGlyphs.js';
 import { buildRenderContract } from '#/kb/render/contract.js';
+import { ENVIRONMENT_INTENSITY } from '#/kb/render/environment.js';
 import type { JobInput } from '#/kb/domain/spec.js';
 
 /** A two-colour mark, so hue preservation is testable per fill. */
@@ -363,5 +364,184 @@ describe('shape assembly', () => {
     // The band has a hole where the face sits, so it is not a filled slab.
     const shapes = contoursToShapes(ring);
     expect(shapes.reduce((n, s) => n + s.holes.length, 0)).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Reflections, gloss and the rim.
+ *
+ * These are why a render reads as CG rather than as a photograph, and none of
+ * them touches geometry — but two of them CAN change what §9.2 says about the
+ * night frame, which is what these pin down.
+ */
+describe('surface realism', () => {
+  // Matched on the part code, not the word. `/face/i` also matches
+  // "CL-P-31 mounting surface", which quietly pulled a wall into a test about
+  // letter faces and failed on a property walls do not have.
+  const materialsOf = (scene: THREE.Scene, name: RegExp): THREE.Material[] => {
+    const found: THREE.Material[] = [];
+    scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh && name.test(mesh.name)) {
+        found.push(...(Array.isArray(mesh.material) ? mesh.material : [mesh.material]));
+      }
+    });
+    return found;
+  };
+
+  it('the environment all but disappears at night', () => {
+    // §9.2 asks that the only bright things in a night frame are what the
+    // contract says emit. An environment bright enough to model a room would
+    // light a face the contract says is dark.
+    expect(ENVIRONMENT_INTENSITY.night).toBeLessThan(ENVIRONMENT_INTENSITY.day / 5);
+    expect(ENVIRONMENT_INTENSITY.night).toBeGreaterThan(0);
+  });
+
+  it('an acrylic face has a gloss layer over its pigment, not a shiny pigment', async () => {
+    // Gloss comes from the lights, not from an environment — see the test
+    // below on why faces get no environment at all.
+    // Dropping roughness would make the colour itself shiny. A clearcoat is a
+    // thin specular layer on top of a matte pigment, which is what acrylic is.
+    const { spec } = await runEngine(heavenCrepes());
+    const scene = buildSignScene(spec, 'studio');
+    const faces = materialsOf(scene.scene, /^CL-P-01 face$/) as THREE.MeshPhysicalMaterial[];
+    expect(faces.length).toBeGreaterThan(0);
+    for (const f of faces) {
+      expect(f.clearcoat).toBeGreaterThan(0);
+      expect(f.roughness).toBeGreaterThan(0.3);
+    }
+  });
+
+  it('a lit face does not also mirror its surroundings', async () => {
+    // A face that emits AND reflects reads as a wet surface rather than a sign.
+    const { spec } = await runEngine(heavenCrepes());
+    const scene = buildSignScene(spec, 'studio');
+    scene.setView('night');
+    const lit = (materialsOf(scene.scene, /^CL-P-01 face$/) as THREE.MeshPhysicalMaterial[])
+      .filter((m) => m.emissiveIntensity > 0);
+    for (const m of lit) expect(m.envMapIntensity).toBe(0);
+  });
+
+  it('the night rig has a rim, so returns are not a flat cut-out', async () => {
+    // Dark returns against a dark ground have no edge at all without one, and
+    // the three-quarter exists precisely to show that edge.
+    const { spec } = await runEngine(haloFlush());
+    const scene = buildSignScene(spec, 'studio');
+    scene.setView('night');
+
+    const directional: THREE.DirectionalLight[] = [];
+    scene.scene.traverse((o) => {
+      if ((o as THREE.DirectionalLight).isDirectionalLight) {
+        directional.push(o as THREE.DirectionalLight);
+      }
+    });
+    // At least one lighting the sign from behind the wall plane.
+    expect(directional.some((l) => l.position.z < 0)).toBe(true);
+  });
+
+  it('no surface carrying a specified colour is ever given an environment', async () => {
+    // The regression this exists for: `scene.environment` applies to
+    // everything, and letter faces rendered #7d52d2 against a specified
+    // #4d148c. Turning the face's own envMapIntensity down to 0.12 moved the
+    // measured colour by ONE unit — the environment reaches a physical
+    // material by more than one path, so the only reliable fix is to give
+    // those surfaces no environment at all.
+    const environment = new THREE.Texture();
+    for (const job of [heavenCrepes(), colourJob()]) {
+      const { spec } = await runEngine(job);
+      const scene = buildSignScene(spec, 'studio', undefined, environment);
+
+      const offenders: string[] = [];
+      scene.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        if (!/face|vinyl|copy/i.test(mesh.name) || /surface/i.test(mesh.name)) return;
+        for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+          const std = m as THREE.MeshStandardMaterial;
+          if (std.envMap || std.envMapIntensity > 0) {
+            offenders.push(`${mesh.name} (envMap=${!!std.envMap}, i=${std.envMapIntensity})`);
+          }
+        }
+      });
+      expect(offenders, 'these would be washed out by an environment').toEqual([]);
+    }
+  });
+
+  it('the metal does get one — that is the point of having it', async () => {
+    const environment = new THREE.Texture();
+    const { spec } = await runEngine(heavenCrepes());
+    const scene = buildSignScene(spec, 'studio', undefined, environment);
+
+    const returns: THREE.MeshStandardMaterial[] = [];
+    scene.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh && mesh.name === 'CL-P-02 return') {
+        returns.push(mesh.material as THREE.MeshStandardMaterial);
+      }
+    });
+    expect(returns.length).toBeGreaterThan(0);
+    for (const r of returns) {
+      expect(r.envMap).toBe(environment);
+      expect(r.envMapIntensity).toBeGreaterThan(0.5);
+    }
+  });
+
+  it('reflections fade with the light rather than persisting into the night', async () => {
+    const environment = new THREE.Texture();
+    const { spec } = await runEngine(heavenCrepes());
+    const scene = buildSignScene(spec, 'studio', undefined, environment);
+
+    const returnMat = (): THREE.MeshStandardMaterial => {
+      let found: THREE.MeshStandardMaterial | null = null;
+      scene.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh && mesh.name === 'CL-P-02 return') {
+          found = mesh.material as THREE.MeshStandardMaterial;
+        }
+      });
+      return found!;
+    };
+
+    scene.setView('day');
+    const byDay = returnMat().envMapIntensity;
+    scene.setView('night');
+    const byNight = returnMat().envMapIntensity;
+    expect(byNight).toBeLessThan(byDay);
+    expect(byNight).toBeGreaterThan(0);
+  });
+
+  it('the wall has relief but no colour of its own', async () => {
+    // A halo raking across a textured wall is most of what makes a photograph
+    // of a halo sign read as a photograph. Relief only: MOUNTING SURFACE COLOR
+    // is a spec-block line, and a texture that tinted the wall would change it.
+    const { spec } = await runEngine(heavenCrepes());
+    const scene = buildSignScene(spec, 'studio');
+    let wall: THREE.MeshStandardMaterial | null = null;
+    scene.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh && mesh.name === 'CL-P-31 mounting surface') {
+        wall = mesh.material as THREE.MeshStandardMaterial;
+      }
+    });
+    expect(wall!.bumpMap).toBeTruthy();
+    expect(wall!.map).toBeFalsy();
+  });
+
+  it('the wall relief is the same texture every run', async () => {
+    // Generated from a coordinate hash, not a random source: two runs of the
+    // same spec have to produce the same bytes.
+    const { surfaceRelief } = await import('#/kb/render/materials.js');
+    const a = surfaceRelief();
+    const b = surfaceRelief();
+    expect(a).toBe(b);
+    expect((a.image.data as Uint8Array).length).toBeGreaterThan(0);
+  });
+
+  it('returns are metallic enough to catch an environment', async () => {
+    const { spec } = await runEngine(heavenCrepes());
+    const scene = buildSignScene(spec, 'studio');
+    const returns = materialsOf(scene.scene, /^CL-P-02 return$/) as THREE.MeshStandardMaterial[];
+    expect(returns.length).toBeGreaterThan(0);
+    for (const r of returns) expect(r.metalness).toBeGreaterThan(0.4);
   });
 });

@@ -90,10 +90,17 @@ export interface Render {
   status: RenderStatus;
   errorMessage: string | null;
   dayImageUrl: string | null;
+  /** The night 3/4: return depth, standoff gap and halo in one view. */
   nightImageUrl: string | null;
   /** Set when a panel could not use the customer's photograph. */
   dayNote?: string | null;
   nightNote?: string | null;
+  /** Set when the picture's empty ground was rendered by a generative model. */
+  dayEnhanced?: string | null;
+  nightEnhanced?: string | null;
+  /** Illustrative only: a generated setting with the real sign composited on it. */
+  conceptImageUrl?: string | null;
+  conceptNote?: string | null;
   blocked: boolean;
   escalations: Array<{ ruleId: string; reason: string; question: string }>;
   problems: string[];

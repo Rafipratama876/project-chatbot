@@ -15,13 +15,15 @@ import { TYPES, isContourBacker } from '../domain/taxonomy.js';
 import { buildRenderContract, type RenderContract, type ElementTruth } from './contract.js';
 import { extrude, flat, boxShape, contoursToShapes } from './shapes.js';
 import {
-  faceMaterial, returnMaterial, trimCapMaterial, haloMaterial, surfaceMaterial,
+  faceMaterial, returnMaterial, trimCapMaterial, haloMaterial, surfaceMaterial, copyMaterial,
+  applyReflections,
   resolveColour, setFaceLit, type View,
 } from './materials.js';
 import { offsetContours, ringAround } from '../geometry/offset.js';
 import { pointInContours } from '../geometry/poly.js';
 import { TRIM_CAP_PROJECTION, RACEWAY_STANDARD, WIREWAY_STANDARD } from '../domain/materials.js';
 import { applyEnvironment } from './lighting.js';
+import { ENVIRONMENT_INTENSITY } from './environment.js';
 
 export type SceneMode =
   /** Neutral wall built from the spec — the default pre-sales output. */
@@ -78,7 +80,18 @@ const SURFACE_EPS = 0.02;
 const backerReveal = (spec: SignSpec): number =>
   Math.max(2, Math.max(...spec.elements.map((e) => e.capHeight), 0) * 0.16);
 
-export function buildSignScene(spec: SignSpec, mode: SceneMode = 'studio'): SignScene {
+export function buildSignScene(
+  spec: SignSpec,
+  mode: SceneMode = 'studio',
+  /** The photograph's own light, so a composite agrees with it. */
+  illuminant?: { r: number; g: number; b: number },
+  /**
+   * Prefiltered environment for the PBR materials to reflect. Optional: the
+   * scene is correct without it, just flatter — nothing about the sign changes,
+   * only what its metal has to catch.
+   */
+  environment?: THREE.Texture,
+): SignScene {
   const contract = spec.renderContract ?? buildRenderContract(spec);
   const scene = new THREE.Scene();
   const type = TYPES[spec.type];
@@ -89,11 +102,13 @@ export function buildSignScene(spec: SignSpec, mode: SceneMode = 'studio'): Sign
 
   // ── CL-P-31 mounting surface ────────────────────────────────────────────
   const area = spec.site?.area ?? { w: spec.overall.w * 2.2, h: spec.overall.h * 3.2 };
-  const wallGeo = new THREE.PlaneGeometry(Math.max(area.w, spec.overall.w * 1.4), Math.max(area.h, spec.overall.h * 2.4));
+  const wallW = Math.max(area.w, spec.overall.w * 1.4);
+  const wallH = Math.max(area.h, spec.overall.h * 2.4);
+  const wallGeo = new THREE.PlaneGeometry(wallW, wallH);
   // In composite mode the real wall is in the photograph. A ShadowMaterial
   // receives the cast shadow and nothing else, so the sign lands on the
   // customer's own facade instead of on a painted stand-in of it.
-  const studioWallMat = surfaceMaterial(spec.mountingSurface.colour);
+  const studioWallMat = surfaceMaterial(spec.mountingSurface.colour, { w: wallW, h: wallH });
   const catcherMat = new THREE.ShadowMaterial({ opacity: 0.34 });
   const wall = new THREE.Mesh(wallGeo, composite ? catcherMat : studioWallMat);
   wall.position.set(spec.overall.w / 2, spec.overall.h / 2, WALL_Z - 0.01);
@@ -179,14 +194,18 @@ export function buildSignScene(spec: SignSpec, mode: SceneMode = 'studio'): Sign
 
   const setView = (v: View) => {
     view = v;
-    applyEnvironment(scene, v, spec, surface === 'composite');
+    applyEnvironment(scene, v, spec, surface === 'composite', illuminant);
+    // Named parts only, never the whole scene. Reflections also drop away at
+    // night: returns keeping a daylight sheen in an unlit frame is its own
+    // kind of wrong.
+    applyReflections(scene, environment, ENVIRONMENT_INTENSITY[v]);
     for (const fn of viewDependent) fn(v);
   };
 
   const setSurface = (next: SceneMode) => {
     surface = next;
     wall.material = next === 'composite' ? catcherMat : studioWallMat;
-    applyEnvironment(scene, view, spec, next === 'composite');
+    applyEnvironment(scene, view, spec, next === 'composite', illuminant);
   };
 
   setView('day');
@@ -225,7 +244,7 @@ function buildLetters(
 
   if (isVinyl) {
     const geo = flat(el.contours);
-    const mat = new THREE.MeshStandardMaterial({ color: resolveColour(el.face.renderColour ?? faceColourOf(el)), roughness: 0.8 });
+    const mat = copyMaterial(el.face.renderColour ?? faceColourOf(el), 0.8);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.z = mountPlaneZ + SURFACE_EPS;
     mesh.name = 'CL-P-24 vinyl application';
@@ -339,8 +358,9 @@ function buildHalo(
   const reach = Math.max(standoff, 1.5) * 3.2;
 
   // Enough shells that the steps fall below what the eye separates. Six read
-  // as concentric rings — a halo drawn as contour lines, not as light.
-  const shells = 18;
+  // as concentric rings — a halo drawn as contour lines, not as light. More
+  // than that also softens the polygonal facets an offset leaves behind.
+  const shells = 28;
   // The halo is the LED reflected off the surface behind, not the LED itself.
   const colour = resolveColour(ledColour ?? 'bright white', '#fbfbf7')
     .multiply(resolveColour(surfaceColour, '#ffffff'));
@@ -349,8 +369,15 @@ function buildHalo(
     const t = i / (shells - 1);
     // Spacing widens outward, so the bright core gets the resolution and the
     // faint tail does not cost eighteen more polygons than it needs.
-    const distance = 0.1 + reach * t ** 2.1;
-    const geo = flat(offsetContours(contours, distance));
+    // A gentler curve than the 2.1 this used to be. That exponent piled most
+    // of the shells within an inch of the letterform, so their sum stayed
+    // above 1 across a wide band and everything in it clipped to flat white —
+    // the "hard edge" of the halo was the CLIPPING CONTOUR, not the edge of any
+    // shell. Measured, the plateau ran about an inch before falling off a cliff.
+    const distance = 0.1 + reach * t ** 1.7;
+    // A twentieth of the fabrication tolerance. This is drawn as light, and a
+    // quarter-inch chord on a five-inch arc reads as a facet.
+    const geo = flat(offsetContours(contours, distance, true, 0.012));
     const mat = haloMaterial(ledColour, 'day', surfaceColour);
 
     const mesh = new THREE.Mesh(geo, mat);
@@ -377,7 +404,13 @@ function buildHalo(
       // at 1.15 sum to about 8, which tone-maps to flat white and throws the
       // gradient away — the halo then reads as a paper cut-out. About 2 at the
       // core keeps it bright while leaving the falloff visible.
-      mat.emissiveIntensity = night ? 0.30 * (1 - t) ** 1.4 : 0;
+      // Peak matters more than any single shell here. A point beside the
+      // letterform sits inside EVERY shell, so it receives the whole sum: at
+      // 0.30 across 18 shells that came to about 2.3, and anything over 1 is
+      // white however much over it is. Tuned so the blown-out core is a
+      // fraction of an inch and the gradient beyond it is visible, which is
+      // what a halo on a wall actually looks like.
+      mat.emissiveIntensity = night ? 0.12 * (1 - t) ** 1.4 : 0;
       mat.opacity = night ? 1 : 0;
 
       // Hidden outright by day, not merely dimmed. Additive blending adds the
@@ -529,10 +562,7 @@ function buildBox(
   }
 
   const copyGeo = flat(el.contours);
-  const copyMat = new THREE.MeshStandardMaterial({
-    color: resolveColour(copyColour),
-    roughness: 0.5,
-  });
+  const copyMat = copyMaterial(copyColour);
   const copy = new THREE.Mesh(copyGeo, copyMat);
   copy.position.z = boxZ + depth + SURFACE_EPS * 2;
   copy.name = 'CL-P-34 copy vinyl';

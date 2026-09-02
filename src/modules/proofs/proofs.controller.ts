@@ -97,9 +97,18 @@ export class ProofsController {
   @ApiOperation({ summary: 'One rendered panel.' })
   async panel(@Param('id') id: string, @Param('name') name: string, @Res() reply: FastifyReply) {
     const proof = await this.proofs.findOne(id);
+    // Either variant is addressable by its own filename, so the base render
+    // stays fetchable even when the enhanced one is what the page shows.
     const panel = proof.panels.find((p) => path.basename(p.file) === name);
-    if (!panel) throw new NotFoundException(`no panel "${name}" on proof ${id}`);
-    return reply.type('image/png').send(createReadStream(panel.file));
+    if (panel) return reply.type('image/png').send(createReadStream(panel.file));
+
+    const enhanced = proof.panels.find(
+      (p) => p.enhanced && path.basename(p.enhanced.file) === name,
+    );
+    if (enhanced?.enhanced) {
+      return reply.type('image/png').send(createReadStream(enhanced.enhanced.file));
+    }
+    throw new NotFoundException(`no panel "${name}" on proof ${id}`);
   }
 
   @Get(':id/trace')

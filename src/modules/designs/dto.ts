@@ -4,6 +4,7 @@ import { BadRequestException } from '@nestjs/common';
 import type { DesignEntity, DesignMessageEntity } from '#/modules/database/entities/design.entity.js';
 import type { WallPresetEntity } from '#/modules/database/entities/wall-preset.entity.js';
 import type { ProofEntity } from '#/modules/database/entities/proof.entity.js';
+import { preferredPanel } from '#/kb/render/panelPlan.js';
 
 const PointSchema = z.object({ x: z.number(), y: z.number() });
 
@@ -96,10 +97,24 @@ export interface RenderView {
   status: 'PENDING' | 'PROCESSING' | 'READY' | 'FAILED' | 'BLOCKED';
   errorMessage: string | null;
   dayImageUrl: string | null;
+  /** The night three-quarter — return depth, standoff gap and halo in one view. */
   nightImageUrl: string | null;
   /** Set when a panel could not use the customer's photograph. */
   dayNote?: string | null;
   nightNote?: string | null;
+  /**
+   * Whether the picture shown had its empty ground rendered by a generative
+   * model. The sign in it is the deterministic render either way.
+   */
+  dayEnhanced?: string | null;
+  nightEnhanced?: string | null;
+  /**
+   * An illustrative concept scene: a generated setting with the real sign
+   * composited on it and verified. Separate from the views on purpose — it is
+   * not evidence of anything and carries no dimensions.
+   */
+  conceptImageUrl: string | null;
+  conceptNote: string | null;
   blocked: boolean;
   escalations: Array<{ ruleId: string; reason: string; question: string }>;
   problems: string[];
@@ -117,21 +132,22 @@ const STATUS: Record<ProofEntity['status'], RenderView['status']> = {
 };
 
 export function toRenderView(proof: ProofEntity, apiPrefix = '/api/v1'): RenderView {
-  // The elevation is what the customer checks placement on, so it is the one
-  // the page shows. `find` rather than `[0]`: panel order is the render
-  // contract's, not this view's, and pinning to an index would silently show
-  // a three-quarter the day the contract gains a panel.
-  const pick = (view: string) =>
-    proof.panels.find((p) => p.view === view && p.camera === 'front-elevation')
-    ?? proof.panels.find((p) => p.view === view);
-
-  const day = pick('day');
-  const night = pick('night');
+  // The same choice the proof sheet makes, from the same function. These were
+  // two separate copies and they disagreed — the sheet showed the night
+  // three-quarter while this page showed the night elevation, so one job had
+  // two documents that did not match.
+  const day = preferredPanel(proof.panels, 'day');
+  const night = preferredPanel(proof.panels, 'night');
+  const concept = proof.panels.find((p) => p.camera === 'concept');
   // The panel endpoint keys on the file's basename, so that is what goes in
   // the URL — reconstructing a name from view and camera would work until the
   // renderer changed how it names files, and then serve 404s with no clue why.
-  const url = (panel?: { file: string }) =>
-    panel ? `${apiPrefix}/proofs/${proof.id}/panels/${basename(panel.file)}` : null;
+  //
+  // The enhanced variant is what gets shown when there is one, matching the
+  // proof sheet. Both files stay on disk; the base is the source of truth and
+  // is what every figure beside the picture was derived from.
+  const url = (panel?: { file: string; enhanced?: { file: string } | null }) =>
+    panel ? `${apiPrefix}/proofs/${proof.id}/panels/${basename(panel.enhanced?.file ?? panel.file)}` : null;
 
   return {
     id: proof.id,
@@ -142,6 +158,10 @@ export function toRenderView(proof: ProofEntity, apiPrefix = '/api/v1'): RenderV
     nightImageUrl: url(night),
     dayNote: day?.note ?? null,
     nightNote: night?.note ?? null,
+    dayEnhanced: day?.enhanced?.reason ?? null,
+    nightEnhanced: night?.enhanced?.reason ?? null,
+    conceptImageUrl: url(concept),
+    conceptNote: concept?.note ?? null,
     blocked: proof.blocked,
     escalations: proof.escalations,
     problems: proof.problems,

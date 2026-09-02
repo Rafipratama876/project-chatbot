@@ -7,7 +7,9 @@
  * unreachable. The failure had no error and no visible cause on the proof.
  */
 import { describe, it, expect } from 'vitest';
-import { panelGround, groundNote, MIN_OBLIQUITY_DEG } from '#/kb/render/panelPlan.js';
+import {
+  panelGround, groundNote, preferredPanel, MIN_OBLIQUITY_DEG,
+} from '#/kb/render/panelPlan.js';
 
 describe('panel ground', () => {
   it('with no photograph, nothing composites', () => {
@@ -49,5 +51,51 @@ describe('panel ground', () => {
   it('a composited panel carries no note — there is nothing to excuse', () => {
     expect(groundNote('oblique-photo')).toBeNull();
     expect(groundNote('front-elevation')).toBeNull();
+  });
+});
+
+describe('which panel stands for a view', () => {
+  // The full set a rendered proof carries.
+  const panels = [
+    { view: 'day', camera: 'front-elevation' },
+    { view: 'day', camera: 'perspective' },
+    { view: 'day', camera: 'detail-perspective' },
+    { view: 'night', camera: 'front-elevation' },
+    { view: 'night', camera: 'perspective' },
+    { view: 'night', camera: 'detail-perspective' },
+  ];
+
+  it('day is the elevation — the panel placement is checked on', () => {
+    expect(preferredPanel(panels, 'day')?.camera).toBe('front-elevation');
+  });
+
+  it('night is the three-quarter — the only angle that shows the construction', () => {
+    // A flat night elevation is a glowing shape: no return depth, no standoff
+    // gap, no halo falling on the wall behind.
+    expect(preferredPanel(panels, 'night')?.camera).toBe('detail-perspective');
+  });
+
+  it('the proof sheet and the review page cannot disagree', () => {
+    // They each used to make this choice themselves and picked differently,
+    // so one job produced two documents showing different pictures.
+    for (const view of ['day', 'night'] as const) {
+      expect(preferredPanel(panels, view)).toBe(preferredPanel([...panels], view));
+    }
+  });
+
+  it('falls back down the order when a camera is missing', () => {
+    const sparse = [{ view: 'night', camera: 'front-elevation' }];
+    expect(preferredPanel(sparse, 'night')?.camera).toBe('front-elevation');
+  });
+
+  it('takes anything for the view rather than blanking the panel', () => {
+    // A render contract that gains a camera must not leave the page empty
+    // until this list is updated.
+    const odd = [{ view: 'night', camera: 'something-new' }];
+    expect(preferredPanel(odd, 'night')?.camera).toBe('something-new');
+  });
+
+  it('returns nothing when the view was not rendered at all', () => {
+    expect(preferredPanel([{ view: 'day', camera: 'front-elevation' }], 'night')).toBeUndefined();
   });
 });

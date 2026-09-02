@@ -57,7 +57,10 @@ export default function ReviewPage() {
   const shown = design.renders.find((r) => r.dayImageUrl && r.nightImageUrl);
   const failed = newest?.status === 'FAILED';
   const blocked = newest?.status === 'BLOCKED' || (newest?.blocked ?? false);
+
+  const currentImage = view === 'day' ? shown?.dayImageUrl : shown?.nightImageUrl;
   const note = view === 'day' ? shown?.dayNote : shown?.nightNote;
+  const enhanced = view === 'day' ? shown?.dayEnhanced : shown?.nightEnhanced;
 
   async function handleSend(message: string) {
     if (!id) return;
@@ -141,11 +144,8 @@ export default function ReviewPage() {
           </div>
 
           <div className="render-frame">
-            {shown ? (
-              <img
-                src={api.assetUrl(view === 'day' ? shown.dayImageUrl! : shown.nightImageUrl!)}
-                alt={`${view} view`}
-              />
+            {shown && currentImage ? (
+              <img src={api.assetUrl(currentImage)} alt={`${view} view`} />
             ) : inFlight ? (
               <p className="empty">Sedang membuat render pertama…</p>
             ) : (
@@ -155,6 +155,28 @@ export default function ReviewPage() {
 
           {/* Why this panel is not on the customer's building, when it isn't. */}
           {note && <p className="panel-note">{note}</p>}
+
+          {/* Whoever signs this has to know a model touched the picture, and
+              exactly how far that went. Not buried in a settings page. */}
+          {enhanced && (
+            <p className="panel-note panel-note-ai">
+              <strong>Latar belakang gambar ini dibuat oleh AI.</strong> {enhanced}
+            </p>
+          )}
+
+          {/* Kept below the proof and visibly separate. The setting in it is
+              generated, so it is a sales picture — not something to check a
+              building against, and nothing is measured from it. */}
+          {shown?.conceptImageUrl && (
+            <div className="concept">
+              <div className="concept-head">
+                <span className="concept-tag">CONCEPT — ILUSTRASI</span>
+                <span>Bukan bagian dari proof</span>
+              </div>
+              <img src={api.assetUrl(shown.conceptImageUrl)} alt="Concept scene" />
+              {shown.conceptNote && <p className="concept-note">{shown.conceptNote}</p>}
+            </div>
+          )}
 
           <div style={{ marginTop: 20 }}>
             <SpecSheet design={design} render={shown} />

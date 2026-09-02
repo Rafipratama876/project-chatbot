@@ -125,7 +125,11 @@ export class ProofsService {
       row.disclosureText = proof.disclosureText;
       // File paths only. The data URLs are megabytes each and the sheet is
       // regenerated on demand from them.
-      row.panels = panels.map(({ label, view, camera, file, note }) => ({ label, view, camera, file, note }));
+      row.panels = panels.map(({ label, view, camera, file, note, enhanced }) => ({
+        label, view, camera, file, note,
+        // Path and reason only — the data URLs are megabytes each.
+        enhanced: enhanced ? { file: enhanced.file, reason: enhanced.reason } : null,
+      }));
       row.sheetHtml = proof.sheetHtml;
       row.problems = proof.problems;
       row.blocked = spec.blocked;

@@ -13,6 +13,7 @@ import { STANDING_NOTES } from '../domain/boilerplate.js';
 import { formatInches } from '../domain/units.js';
 import { renderSectionDetail, renderElevation } from './sectionDetail.js';
 import type { DisclosureBundle } from './disclosures.js';
+import { preferredPanel } from '../render/panelPlan.js';
 
 export interface SheetPanel {
   view: 'day' | 'night';
@@ -21,6 +22,8 @@ export interface SheetPanel {
   file?: string;
   /** Set by the renderer when the panel could not use the photograph. */
   note?: string | null;
+  /** Presentation-only variant with a generatively rendered neutral ground. */
+  enhanced?: { file: string; dataUrl?: string; reason: string } | null;
 }
 
 export interface ProofSheetInput {
@@ -35,26 +38,31 @@ export interface ProofSheetInput {
 const esc = (s: unknown): string =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-const src = (p?: SheetPanel): string => p?.dataUrl ?? (p?.file ? `file://${p.file}` : '');
+/**
+ * The picture to print.
+ *
+ * The enhanced variant when there is one — its sign is the deterministic
+ * render, restored and verified, so what differs is only the ground behind it.
+ * The base is always still on disk, and the spec block beside it is derived
+ * from the spec either way, never from the picture.
+ */
+const src = (p?: SheetPanel): string => {
+  const chosen = p?.enhanced ?? p;
+  return chosen?.dataUrl ?? (chosen?.file ? `file://${chosen.file}` : '');
+};
+
+/** Everything the panel has to say for itself, underneath it. */
+const noteOf = (p: SheetPanel | undefined, fallback?: string): string | undefined => {
+  const parts = [p?.note ?? fallback, p?.enhanced?.reason].filter(Boolean) as string[];
+  return parts.length > 0 ? parts.join(' ') : undefined;
+};
 
 export function renderProofSheet(input: ProofSheetInput): string {
   const { spec, disclosures, panels, kbVersion } = input;
-  // The two panels answer different questions. The day view answers "what will
-  // this look like on my building", so it is the elevation, composited onto the
-  // customer's photograph. The night view answers "how is it built and how does
-  // it light", so it is the 3/4 — the only angle where the return depth, the
-  // standoff gap and the halo are visible at the same time. A flat night
-  // elevation shows a glowing shape and none of the construction.
-  const pick = (view: 'day' | 'night', ...cameras: string[]): SheetPanel | undefined => {
-    for (const camera of cameras) {
-      const found = panels.find((p) => p.view === view && p.camera === camera);
-      if (found) return found;
-    }
-    return panels.find((p) => p.view === view);
-  };
-
-  const day = pick('day', 'front-elevation', 'perspective');
-  const night = pick('night', 'detail-perspective', 'perspective', 'front-elevation');
+  // Which camera stands for each view is a policy shared with the review page,
+  // so the sheet and the screen cannot drift apart again.
+  const day = preferredPanel(panels, 'day');
+  const night = preferredPanel(panels, 'night');
 
   // A proof rendered against a neutral wall looks like a design decision unless
   // it says otherwise. §9.2 asks the sign to sit inside the measured area and
@@ -101,12 +109,12 @@ export function renderProofSheet(input: ProofSheetInput): string {
   </header>
 
   <section class="views">
-    ${viewPanel('DAY VIEW', day, onBuilding
-      ? day?.note ?? undefined
-      : 'Shown on a neutral wall — no site photograph was supplied.')}
-    ${viewPanel('NIGHT VIEW', night, onBuilding
-      ? night?.note ?? undefined
-      : 'Shown on a neutral wall — no site photograph was supplied.')}
+    ${viewPanel('DAY VIEW', day, noteOf(day, onBuilding
+      ? undefined
+      : 'Shown on a neutral wall — no site photograph was supplied.'))}
+    ${viewPanel('NIGHT VIEW', night, noteOf(night, onBuilding
+      ? undefined
+      : 'Shown on a neutral wall — no site photograph was supplied.'))}
   </section>
 
   <section class="three">
@@ -224,6 +232,11 @@ h1 { margin:0; font-size:22px; letter-spacing:-.01em; }
 .views { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:14px; }
 .view { margin:0; position:relative; border:1px solid var(--line); background:#f4f4f4; }
 .view figcaption { position:absolute; top:10px; left:10px; background:var(--bar); color:#fff; padding:5px 12px; font-size:11px; font-weight:700; letter-spacing:.06em; z-index:1; }
+/* In flow beneath the image, not floating over it. Without this the note
+   inherits the title's absolute position and sits on top of the title —
+   hiding which panel it belongs to, which is the one thing it must not do. */
+.view-note.view-note { position:static; background:#f0f0f0; color:var(--muted); font-weight:400;
+  letter-spacing:0; font-size:10.5px; line-height:1.45; padding:7px 10px; border-top:1px solid var(--line); }
 .view img { display:block; width:100%; height:auto; }
 .missing { padding:60px; text-align:center; color:var(--muted); }
 .three { display:grid; grid-template-columns:340px 1fr 1fr; gap:14px; margin-bottom:14px; }

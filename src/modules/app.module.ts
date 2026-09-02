@@ -6,6 +6,7 @@ import llmConfig from '#/config/llm.config.js';
 import renderConfig from '#/config/render.config.js';
 import queueConfig from '#/config/queue.config.js';
 import storageConfig from '#/config/storage.config.js';
+import enhanceConfig from '#/config/enhance.config.js';
 import { DatabaseModule } from './database/database.module.js';
 import { KnowledgeModule } from './knowledge/knowledge.module.js';
 import { EngineModule } from './engine/engine.module.js';
@@ -41,7 +42,10 @@ import { DesignsModule } from './designs/designs.module.js';
 @Module({
   imports: [
     ConfigModule.forRoot({
-      load: [appConfig, databaseConfig, llmConfig, renderConfig, queueConfig, storageConfig],
+      load: [
+        appConfig, databaseConfig, llmConfig, renderConfig, queueConfig,
+        storageConfig, enhanceConfig,
+      ],
       isGlobal: true,
       cache: true,
     }),

@@ -100,7 +100,7 @@ ran would carry a disclosure list describing decisions that no longer match it.
 Every change makes a new version instead, which is also what makes the version
 history real rather than cosmetic.
 
-Both views go on the customer's building. The night panel is the 3/4 — the only
+Both views go on the customer's building. The night view is the 3/4 — the only
 angle where the return depth, the standoff gap and the halo are visible at once
 — and it stays on the photograph rather than dropping to a studio backdrop.
 
@@ -248,6 +248,135 @@ docs/           ARCHITECTURE.md, GATES.md, KB-BINDING.md
 thresholds from Postgres, judgment from a model, pixels from a browser — and
 calls in. `docs/ARCHITECTURE.md` explains why the arrow points that way, and
 which three tables use pgvector (none of them holds a rule).
+
+## Seating the sign in the photograph
+
+Three deterministic passes, applied after the render. Arithmetic on pixels the
+renderer already produced — no model, no sampling, no seed, so the same spec
+and photograph give the same bytes. None of them repaints the sign: the face,
+the returns and the trim keep the colours the spec block states.
+
+- **Contact occlusion.** A sign stood off a wall blocks the sky from the gap
+  behind it, so the wall darkens close to the letters. Its absence is the
+  strongest single tell that something was pasted on, and the reach follows the
+  real standoff — a 1″ spacer and an 8″ raceway must not shade the wall alike.
+- **Light spill.** An illuminated sign throws light onto what surrounds it. On
+  a composite that is spill onto the wall; on a studio panel, where the surface
+  is part of the same render, it is bloom over the frame. Without it a night
+  view is a bright shape on a dark wall, which is a picture of a sticker.
+- **Illuminant matching.** The photograph was taken under light with a colour
+  of its own, and the sign is lit to match — applied to the LIGHTS, not to the
+  pigment, which is why it is not repainting a specified value. Half the
+  measured cast, because a grey-world estimate is the light *and* the subject:
+  a brick facade reads warm because it is brick.
+
+The renderer itself carries the other half: PBR materials with a **procedural
+environment** to reflect (`RoomEnvironment` through a PMREM, generated at call
+time — no HDR file to fetch and no way for two runs to differ), **clearcoat**
+on acrylic faces and trim so the gloss sits over the pigment rather than in it,
+and a **rim light** at night so dark returns against a dark ground still have
+an edge. Environment intensity drops to 0.05 at night: at 0.14 the mounting
+surface measured luma 84 across the whole frame — a dusk wall, not a night one
+— and the halo's own falloff was lost inside it.
+
+**The halo never reaches the frame as geometry.** It is built as offset shells
+because those carry the perspective, but a night panel renders three passes —
+halo alone, sign alone, then the scene with the halo hidden — and the halo pass
+is blurred into a wash that is added to the wall and stops at the letters.
+Light is thrown backwards onto a surface with the sign standing in front of it;
+laid over the top it would wash across the faces and take their colour with it.
+
+Drawn directly, stacked offsets read as concentric contour bands no matter how
+fine the arcs are — 28 polygons are 28 edges. Two separate defects were feeding
+that: Clipper's `ArcTolerance` was 1/4″, which facets an arc offset several
+inches out, and before that the night bloom was adding a blurred copy of the
+halo on top of the halo and saturating a band 40 px wide.
+
+A **vignette** closes it. That one models the camera rather than the sign — it
+describes nothing about the product and changes no specified value; it exists
+so the panel reads as a photograph of a lit sign rather than a picture of one.
+Studio panels only: a composite already carries the customer's own camera's
+falloff.
+
+**The environment is given to named parts, never to the scene.** `ENV_REFLECTANCE`
+in `materials.ts` lists what reflects and how much; anything absent has no
+`envMap` at all. That is not tidiness. Set as `scene.environment` it reaches
+every surface, and letter faces rendered #7d52d2 against a specified #4d148c —
+turning the face's own `envMapIntensity` down to 0.12 moved the measured colour
+by *one unit*, because the environment reaches a physical material by more than
+one path. FACE COLOR is a spec-block line and the customer reads it off the
+picture, so the faces get no environment and the pigment wins over optical
+completeness.
+
+Note what is deliberately *not* here: softer shadows. The sun subtends 0.53°,
+so at a 5″ standoff its penumbra is 0.046″ — a real cast shadow at this scale
+IS sharp, and blurring it is a prettier picture of something that does not
+happen. See `src/kb/render/integrate.ts`.
+
+## The concept scene
+
+`ENHANCE_ENABLED=true` plus an `OPENAI_API_KEY` adds one illustrative image per
+render: a generated setting with the real sign composited onto it.
+
+```
+  model draws a blank wall ──┐
+                             ├──► deterministic composite ──► VERIFY ──► scene
+  three.js renders the sign ─┘        (occlusion, then glow)
+```
+
+The sign is never sent to the model, so it cannot come back as something
+logo-like: it is rendered here, laid over whatever arrives, and then checked
+pixel for pixel against the render before the glow is drawn. If a single sign
+pixel differs, the scene is discarded and the proof is unaffected.
+
+This is the one place the "generate the background, keep the logo" pipeline
+applies, and the reason is narrow: here the background genuinely *is* a
+synthetic asset. On a proof panel it is the customer's photograph — evidence,
+not decoration — which is why the same idea is refused there.
+
+It is deliberately **not on the proof sheet**. It carries no dimensions,
+nothing is measured from it, and it is labelled as illustrative wherever it
+appears. The sheet is the document a customer signs.
+
+## The optional generative pass
+
+Off by default (`ENHANCE_ENABLED`). When on, a model may repaint **only frame
+that the deterministic renderer left empty**, and the guarantee is structural
+rather than a promise:
+
+```
+  three.js panel ──┬──► model (panel + mask) ──► returned image
+                   │                                   │
+                   │        every protected pixel ◄─────┘
+                   └──────► copied back, then VERIFIED byte for byte
+                                          │
+                            fails ────────┴──────── passes
+                              │                        │
+                     keep the base render      store BOTH; base stays
+                                               the source of truth
+```
+
+A mask handed to a sampler is a request. Restoring the pixels makes it an
+outcome; verifying afterwards makes it an assertion — one that catches *our*
+bugs (a mask off by a row, a decoder swapping channels, a library resizing the
+result), which are the failures that produce a plausible picture of the wrong
+sign. See `src/kb/render/protect.ts`.
+
+Two things are never touched, and between them they usually leave nothing to
+do — which is the honest outcome, not a defect:
+
+- **The customer's photograph.** It is evidence, not backdrop. This is what
+  most "enhance the background" designs get wrong: they assume the background
+  is a rendered asset. Here it is the site, and a repainted facade is a picture
+  of a building that does not exist.
+- **Everything the renderer drew.** Not just the letterforms — the surface
+  behind them is CL-P-31's mounting surface, and its colour is a spec-block
+  line. A studio panel is usually covered edge to edge, so the editable region
+  is empty and the pass is a no-op by construction.
+
+When it does run, the proof says so, on the sheet and on screen. The base
+render is always kept beside the enhanced one, so a bad enhancement can never
+cost the design.
 
 ## What pgvector is and is not used for
 

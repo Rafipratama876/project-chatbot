@@ -62,3 +62,42 @@ export function groundNote(reason: PanelGround['reason']): string | null {
       return null;
   }
 }
+
+/**
+ * Which panel represents a view, when only one can be shown.
+ *
+ * The two views answer different questions, so they want different cameras.
+ * The day view answers "what will this look like on my building", so it is the
+ * elevation on the customer's photograph. The night view answers "how is it
+ * built and how does it light" — that is the three-quarter, the only angle
+ * where the return depth, the standoff gap and the halo are visible at once. A
+ * flat night elevation shows a glowing shape and none of the construction.
+ *
+ * Shared rather than restated. The proof sheet and the review page each had
+ * their own copy of this choice, and they disagreed: the sheet showed the
+ * three-quarter at night while the page showed the elevation, so the two
+ * documents for one job did not match and neither was obviously wrong.
+ */
+export function preferredPanel<T extends { view: string; camera: string }>(
+  panels: readonly T[],
+  view: 'day' | 'night',
+): T | undefined {
+  // Day is the elevation: it is what placement is checked on, and it goes on
+  // the customer's photograph. Night is the three-quarter — the only angle
+  // where the return depth, the standoff gap and the halo are visible at once.
+  // A flat night elevation shows a glowing shape and none of the construction,
+  // which is what the night panel exists to show.
+  const order = view === 'day'
+    ? ['front-elevation', 'perspective', 'detail-perspective']
+    : ['detail-perspective', 'perspective', 'front-elevation'];
+
+  for (const camera of order) {
+    const found = panels.find((p) => p.view === view && p.camera === camera);
+    if (found) return found;
+  }
+  // Anything for that view beats nothing: a render contract that gains a
+  // camera should not blank the panel until this list catches up. Except a
+  // concept scene, which is an illustration with a generated setting — it must
+  // never stand in for the panel a customer checks their building against.
+  return panels.find((p) => p.view === view && p.camera !== 'concept');
+}

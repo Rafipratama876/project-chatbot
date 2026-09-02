@@ -27,6 +27,12 @@ export interface ProofPanel {
    * dropped by the next `map` someone writes.
    */
   note?: string | null;
+  /**
+   * A presentation-only variant whose neutral ground was rendered by a
+   * generative model. The sign in it is the deterministic render, restored
+   * pixel for pixel and verified — see `render/protect.ts`.
+   */
+  enhanced?: { file: string; dataUrl?: string; reason: string } | null;
 }
 
 export interface Proof {
@@ -67,6 +73,21 @@ export function assembleProof(spec: SignSpec, trace: TraceLog, opts: AssembleOpt
   }
 
   const panels = opts.panels ?? [];
+
+  // A customer signing this has to know whether the picture in front of them
+  // was touched by a generative model, and exactly how far that went. Stated
+  // on the proof itself rather than left to a setting nobody sees.
+  const enhanced = panels.filter((p) => p.enhanced);
+  if (enhanced.length > 0) {
+    disclosures.precedenceNotes.push(
+      `The ${enhanced.map((p) => p.view).join(' and ')} view${enhanced.length === 1 ? '' : 's'} `
+      + 'shown here had the empty ground behind the sign rendered by a generative model. '
+      + 'The sign itself — its outline, colours, dimensions and position — is the '
+      + 'deterministic render, restored pixel for pixel and verified against it. '
+      + 'Every figure in this document comes from the specification, not from the picture.',
+    );
+  }
+
   return {
     jobId: spec.jobId,
     businessName: spec.businessName,
