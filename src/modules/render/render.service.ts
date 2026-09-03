@@ -206,14 +206,16 @@ export class RenderService implements OnModuleDestroy {
     try {
       const layers = (await page.evaluate(
         ([s, o]) => (window as unknown as {
-          __renderLayers: (spec: unknown, opts: unknown) => Promise<{ sign: string; background: string }>;
+          __renderLayers: (spec: unknown, opts: unknown) => Promise<{ sign: string; background: string; halo: string | null; lettersMask: string }>;
         }).__renderLayers(s, o),
         [spec, { width, height, view, camera }] as const,
-      )) as { sign: string; background: string };
+      )) as { sign: string; background: string; halo: string | null; lettersMask: string };
 
       const result = await this.enhance.layeredNight({
         signLayer: Buffer.from(layers.sign.split(',')[1]!, 'base64'),
         background: Buffer.from(layers.background.split(',')[1]!, 'base64'),
+        haloGlow: layers.halo ? Buffer.from(layers.halo.split(',')[1]!, 'base64') : null,
+        lettersMask: Buffer.from(layers.lettersMask.split(',')[1]!, 'base64'),
         view,
         spec,
         // The second render: the same sign under the light measured off the

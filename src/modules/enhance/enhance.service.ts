@@ -322,6 +322,28 @@ export class EnhanceService implements OnApplicationBootstrap {
      * placed. Costs one more render and no extra call.
      */
     relight?: (gain: { r: number; g: number; b: number }) => Promise<Buffer>;
+    /**
+     * The halo, already rendered and blurred off the sign's own geometry —
+     * see `blurredHalo` in browser-entry.ts. Null on a construction with no
+     * halo shells (front-lit only). Passed through rather than left for the
+     * ground pass to invent: a generative model redraws material and colour
+     * temperature, not the shape of light behind a specific letterform, and
+     * asked for one anyway it drew a generic radial wash centred on the frame
+     * — the same failure a painted-on night wash always had, just moved to a
+     * different stage of the pipeline.
+     */
+    haloGlow?: Buffer | null;
+    /**
+     * Greyscale PNG: the letters and returns alone, `sign`'s own alpha with
+     * the backer panel (and the mounting surface) subtracted out — see its
+     * own comment in `renderLayers`. On a direct-mounted sign with no backer
+     * this is the same shape as `sign`'s alpha; the difference only shows up
+     * once a backer makes the two diverge, which is exactly when it matters.
+     * Optional so an older caller — `conceptScene`, which has no separate
+     * halo pass to mask for — still works: `seatSign` falls back to `sign`'s
+     * own alpha.
+     */
+    lettersMask?: Buffer | null;
   }): Promise<{ png: Buffer | null; reason: string }> {
     if (!this.enabled) return { png: null, reason: 'enhancement is switched off' };
 
@@ -346,7 +368,9 @@ export class EnhanceService implements OnApplicationBootstrap {
         }
       }
 
-      const merged = this.seatSign(sign, ground, input.view, input.spec);
+      const merged = this.seatSign(
+        sign, ground, input.view, input.spec, input.haloGlow ?? null, input.lettersMask ?? null,
+      );
       if (!merged.ok) {
         this.logger.error(`layered night discarded: ${merged.reason}`);
         return { png: null, reason: `layered night discarded — ${merged.reason}` };
@@ -384,9 +408,30 @@ export class EnhanceService implements OnApplicationBootstrap {
     ground: PNG,
     view: 'day' | 'night',
     spec: SignSpec,
+    /** Pre-rendered off the sign's own halo geometry. Null when it has none. */
+    haloGlow: Buffer | null,
+    /**
+     * Greyscale PNG, letters and returns only — the backer panel (and
+     * mounting surface) subtracted out of `sign`'s own alpha. Falls back to
+     * that full alpha when absent, which is only ever right on a sign with
+     * no backer: with one, `sign` is opaque across its whole footprint, not
+     * just the copy, so masking the glow by it holds the halo back exactly
+     * where it is meant to land — on the backer's face, close around each
+     * letter.
+     */
+    lettersMask: Buffer | null,
   ): { ok: true; png: Buffer; compared: number } | { ok: false; reason: string } {
     const alpha = new Uint8Array(sign.width * sign.height);
     for (let i = 0; i < alpha.length; i++) alpha[i] = sign.data[i * 4 + 3]!;
+
+    const glowCoverage = lettersMask
+      ? (() => {
+          const mask = PNG.sync.read(lettersMask);
+          const out = new Uint8Array(sign.width * sign.height);
+          for (let i = 0; i < out.length; i++) out[i] = mask.data[i * 4]!;
+          return out;
+        })()
+      : alpha;
 
     const standoff = Math.max(...spec.elements.map((e) => e.returnDepth ?? 5), 1);
     const radius = Math.max(3, Math.min(48, (sign.width / 90) * standoff * 0.35));
@@ -405,15 +450,48 @@ export class EnhanceService implements OnApplicationBootstrap {
     );
     if (!check.ok) return { ok: false, reason: check.reason ?? 'the sign did not survive the composite' };
 
-    const merged = view === 'night'
-      ? applySpill(seated, sign.width, sign.height, lightSpill(
-          sign.data, sign.width, sign.height,
-          // Tight and short. The spill is the light the sign throws PAST itself,
-        // and a wide soft one reads as fog around the letters rather than as a
-        // sign lighting a wall — the same failure the halo itself had.
-        { tight: Math.max(4, radius * 0.4), wide: Math.max(12, radius * 1.8), strength: 0.45 },
-        ), alpha)
-      : seated;
+    let merged: Uint8ClampedArray = seated;
+    if (view === 'night' && haloGlow) {
+      // The real thing, not an invention of this pass: `haloGlow` is the same
+      // concentric-shell halo `render()` draws for a studio panel, rendered
+      // off this sign's own geometry and blurred deterministically (see
+      // `blurredHalo` in browser-entry.ts), tight against the letterform and
+      // fading within a letter-height or so. Left to the ground pass instead,
+      // it has no idea what shape the letters are and drew a generic warm
+      // pool centred on the frame regardless — the failure this exists to
+      // avoid.
+      const glowPng = PNG.sync.read(haloGlow);
+      const channel = (offset: number): Float32Array => {
+        const out = new Float32Array(sign.width * sign.height);
+        for (let i = 0; i < out.length; i++) out[i] = glowPng.data[i * 4 + offset]! / 255;
+        return out;
+      };
+      merged = applySpill(
+        seated, sign.width, sign.height,
+        { r: channel(0), g: channel(1), b: channel(2) },
+        glowCoverage,
+      );
+    } else if (view === 'night') {
+      // No halo geometry on this construction (front-lit only), so `sign`
+      // carries no shells for `haloGlow` to come from — see its own comment.
+      // Whatever light reaches the wall around the letters has to come from
+      // this spill instead, computed off the sign layer's own emissive
+      // pixels. Sized off the standoff it used to stay a thin rim hugging the
+      // return depth — correct for a tight halo, but a front-lit face throws
+      // nothing else into the frame, so that rim was the sign's whole glow
+      // and read as barely lit next to a real photograph of one. Sized off
+      // the sign's width instead, so the bleed reads as light leaving the
+      // face rather than as a shadow catching the standoff gap.
+      merged = applySpill(seated, sign.width, sign.height, lightSpill(
+        sign.data, sign.width, sign.height,
+        {
+          threshold: 130,
+          tight: Math.max(4, Math.round(sign.width * 0.01)),
+          wide: Math.max(24, Math.round(sign.width * 0.06)),
+          strength: 0.4,
+        },
+      ), glowCoverage);
+    }
 
     const out = new PNG({ width: sign.width, height: sign.height });
     out.data = Buffer.from(merged);
@@ -520,7 +598,12 @@ export class EnhanceService implements OnApplicationBootstrap {
     const sign = PNG.sync.read(input.signLayer);
     try {
       const setting = await this.generateSetting(input, sign.width, sign.height);
-      const merged = this.seatSign(sign, setting, input.view, input.spec);
+      // `signLayer` here comes from `__renderSignLayer`, not `__renderLayers`
+      // — a single front-elevation render with no separate halo pass, so
+      // there is no pre-blurred glow to hand in. Whatever halo shells the
+      // sign has are already baked into its own pixels (see the comment on
+      // `renderSignLayer`), and `seatSign` falls back to a spill off them.
+      const merged = this.seatSign(sign, setting, input.view, input.spec, null, null);
       if (!merged.ok) {
         this.logger.error(`concept scene discarded: ${merged.reason}`);
         return { png: null, reason: `concept scene discarded — ${merged.reason}` };

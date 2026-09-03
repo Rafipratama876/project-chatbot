@@ -84,7 +84,7 @@ declare global {
         /** Skip the ground pass — used for the relit second sign render. */
         signOnly?: boolean;
       },
-    ) => Promise<{ sign: string; background: string }>;
+    ) => Promise<{ sign: string; background: string; halo: string | null; lettersMask: string }>;
   }
 }
 
@@ -902,26 +902,36 @@ function flattenOnto(
     const w = out.width;
     const h = out.height;
     const frame = ctx.getImageData(0, 0, w, h);
-    // Restrained on purpose. At threshold 110 / strength 0.5 this was adding a
-    // blurred copy of the halo on top of the halo, and the sum saturated a band
-    // 40 px wide — measured. That plateau was the "hard edge" of the glow: not
-    // the edge of any shell, but the contour where bloom + halo crossed 255.
-    // A halo on a wall IS the light; a second glow over it is invention.
-    const glow = lightSpill(frame.data, w, h, {
-      threshold: 170,
-      tight: Math.max(2, Math.round(w * 0.003)),
-      wide: Math.max(6, Math.round(w * 0.012)),
-      strength: 0.12,
-    });
+    // Restrained when a halo already washed the wall (`glow` above, not the
+    // local var below — a rear-illuminated sign's light is already drawn as a
+    // real gradient there. At threshold 110 / strength 0.5 this was adding a
+    // blurred copy of the halo on top of the halo, and the sum saturated a
+    // band 40 px wide — measured. That plateau was the "hard edge" of the
+    // glow: not the edge of any shell, but the contour where bloom + halo
+    // crossed 255. A halo on a wall IS the light; a second glow over it is
+    // invention.
+    //
+    // A front-lit sign has no halo shells and nothing else in the frame
+    // carrying its light — an emissive face lights nothing around it in
+    // three.js, so bloom is the ONLY thing standing in for what a camera
+    // shows around an unshielded LED face: a broad, soft light bleed past the
+    // letterform, not a thin rim (cf. the reference this was checked
+    // against — a lit FedEx face throwing a wide, soft glow onto the wall
+    // around and behind it, not a hairline edge light). Nothing here doubles
+    // in that case, so it runs wider and stronger.
+    const params = glow
+      ? { threshold: 170, tight: Math.max(2, Math.round(w * 0.003)), wide: Math.max(6, Math.round(w * 0.012)), strength: 0.12 }
+      : { threshold: 130, tight: Math.max(4, Math.round(w * 0.01)), wide: Math.max(24, Math.round(w * 0.06)), strength: 0.4 };
+    const bloom = lightSpill(frame.data, w, h, params);
     for (let i = 0; i < w * h; i++) {
       const o = i * 4;
       // Held back where the frame is already bright, so bloom lifts the dark
       // wall rather than piling onto something that is at 255 already.
       const peak = Math.max(frame.data[o]!, frame.data[o + 1]!, frame.data[o + 2]!);
       const hold = 1 - Math.min(1, peak / 255) ** 2;
-      frame.data[o] = Math.min(255, frame.data[o]! + glow.r[i]! * 255 * hold);
-      frame.data[o + 1] = Math.min(255, frame.data[o + 1]! + glow.g[i]! * 255 * hold);
-      frame.data[o + 2] = Math.min(255, frame.data[o + 2]! + glow.b[i]! * 255 * hold);
+      frame.data[o] = Math.min(255, frame.data[o]! + bloom.r[i]! * 255 * hold);
+      frame.data[o + 1] = Math.min(255, frame.data[o + 1]! + bloom.g[i]! * 255 * hold);
+      frame.data[o + 2] = Math.min(255, frame.data[o + 2]! + bloom.b[i]! * 255 * hold);
     }
     ctx.putImageData(frame, 0, 0);
   }
@@ -1100,7 +1110,7 @@ async function renderLayers(
     illuminant?: { r: number; g: number; b: number };
     signOnly?: boolean;
   },
-): Promise<{ sign: string; background: string }> {
+): Promise<{ sign: string; background: string; halo: string | null; lettersMask: string }> {
   const { width, height, view } = opts;
   const camera = opts.camera ?? 'detail-perspective';
 
@@ -1148,11 +1158,34 @@ async function renderLayers(
   renderer.render(signScene.scene, cam);
   setHaloVisible(signScene.scene, true);
   const sign = grab();
+
+  // The halo, separately — the same shells `render()` draws for a studio
+  // panel, blurred the same way (see `blurredHalo`), so it reaches the
+  // composite as light already shaped by the letterform rather than as a
+  // silhouette the ground pass has to guess at. `blurredHalo` returns null on
+  // a construction with no shells (front-lit only): nothing to send, and
+  // `seatSign` falls back to a spill off the sign's own emissive pixels.
+  const glow = blurredHalo(renderer, signScene.scene, cam, width, height);
+  const halo = glow ? glowDataUrl(glow, width, height) : null;
+
+  // The letters and returns alone — `sign`'s own alpha with the backer panel
+  // (and the mounting surface, on a direct-mount job) subtracted out. `sign`
+  // is opaque across the whole backer, not just the copy, and `seatSign`
+  // needs to know where the copy itself is: the halo shells sit ON the
+  // backer's face, close in around each letter, and masking the glow by
+  // `sign`'s full alpha would hold it back everywhere the backer is solid —
+  // which, on a backed sign, is the halo's entire reach. `isHaloGround`
+  // already draws exactly this line for the non-layered path's own masking;
+  // this is the same test, computed here so `seatSign` does not have to parse
+  // mesh names out of a flattened PNG.
+  const lettersMask = alphaArrayDataUrl(
+    signCoverage(renderer, signScene.scene, cam, width, height), width, height,
+  );
   signScene.dispose();
 
   if (opts.signOnly) {
     renderer.dispose();
-    return { sign, background: '' };
+    return { sign, background: '', halo, lettersMask };
   }
 
   // The same scene, same camera, with everything but the mounting surface
@@ -1168,7 +1201,59 @@ async function renderLayers(
   groundScene.dispose();
 
   renderer.dispose();
-  return { sign, background };
+  return { sign, background, halo, lettersMask };
+}
+
+/**
+ * A blurred-halo wash, as an image instead of the two Float32Arrays
+ * `blurredHalo` returns.
+ *
+ * `renderLayers` runs inside the page and hands its result to Node through
+ * `page.evaluate`, which serialises through JSON — a Float32Array the size of
+ * the frame would cross that boundary as a plain array of numbers, three of
+ * them, at full precision. A PNG the same size crosses it as one short
+ * base64 string, and 8 bits of headroom is more than the glow this feeds ever
+ * carries (see `applySpill` — it is added on top of a rendered frame, not
+ * relied on for its own detail). Alpha is left opaque; the intensity is IN
+ * the colour channels, exactly how `seatSign` reads it back out.
+ */
+function glowDataUrl(
+  glow: { r: Float32Array; g: Float32Array; b: Float32Array },
+  width: number,
+  height: number,
+): string {
+  const c = document.createElement('canvas');
+  c.width = width;
+  c.height = height;
+  const ctx = c.getContext('2d')!;
+  const img = ctx.createImageData(width, height);
+  for (let i = 0; i < width * height; i++) {
+    const o = i * 4;
+    img.data[o] = Math.min(255, glow.r[i]! * 255);
+    img.data[o + 1] = Math.min(255, glow.g[i]! * 255);
+    img.data[o + 2] = Math.min(255, glow.b[i]! * 255);
+    img.data[o + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL('image/png');
+}
+
+/** A raw alpha buffer, as a greyscale PNG — same encoding `alphaOf` uses. */
+function alphaArrayDataUrl(alpha: Uint8Array, width: number, height: number): string {
+  const c = document.createElement('canvas');
+  c.width = width;
+  c.height = height;
+  const ctx = c.getContext('2d')!;
+  const img = ctx.createImageData(width, height);
+  for (let i = 0; i < width * height; i++) {
+    const a = alpha[i]!;
+    img.data[i * 4] = a;
+    img.data[i * 4 + 1] = a;
+    img.data[i * 4 + 2] = a;
+    img.data[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c.toDataURL('image/png');
 }
 
 if (typeof window !== 'undefined') window.__renderLayers = renderLayers;
