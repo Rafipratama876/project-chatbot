@@ -6,7 +6,9 @@ import {
   protectionMask, summarise, maskToRgba, restoreProtected, verifyProtected,
   verifyCompositedSign, logoColourLeakFraction, ProtectionError,
 } from '#/kb/render/protect.js';
-import { contactOcclusion, lightSpill, integrate, applySpill } from '#/kb/render/integrate.js';
+import {
+  contactOcclusion, lightSpill, integrate, applySpill, measureIlluminant, temper,
+} from '#/kb/render/integrate.js';
 import type { SignSpec } from '#/kb/domain/spec.js';
 import { TYPES } from '#/kb/domain/taxonomy.js';
 
@@ -282,6 +284,231 @@ export class EnhanceService implements OnApplicationBootstrap {
    * it — the label says so, and it is deliberately kept off the proof sheet,
    * which is the document a customer signs.
    */
+
+  /** Which night pipeline is configured. See `enhance.config.ts`. */
+  get nightMode(): 'inpaint' | 'layered' {
+    return this.config.get<'inpaint' | 'layered'>('enhance.nightMode') ?? 'inpaint';
+  }
+
+  /**
+   * The night panel as three layers: rendered ground, model, rendered sign.
+   *
+   * The sign never goes to the model. It is rendered here, the ground is
+   * rendered here too and only THAT is sent away, and the two are added back
+   * together by this machine — so the finished picture cannot contain a logo,
+   * a halo or a dimension a model invented. The composite is then verified
+   * against the sign layer pixel for pixel, exactly as the concept scene is.
+   *
+   * The cost is one extra pair of renders and one call. What it buys is the
+   * one thing the unmasked pass gives up: the sign in the picture is provably
+   * the sign in the specification.
+   */
+  async layeredNight(input: {
+    signLayer: Buffer;
+    background: Buffer;
+    view: 'day' | 'night';
+    spec: SignSpec;
+    /**
+     * The background is the customer's own photograph, not a rendered wall.
+     * It changes what the model is asked for — relight this building, do not
+     * invent a wall — and what the proof is allowed to claim afterwards.
+     */
+    onPhotograph?: boolean;
+    /**
+     * Renders the sign again under a measured light. Optional, and the whole
+     * difference between a composite and a cut-out: the model gives the wall
+     * its own colour temperature, and a sign lit by a studio neutral in front
+     * of a wall lit by a sodium lamp reads as pasted on however exactly it is
+     * placed. Costs one more render and no extra call.
+     */
+    relight?: (gain: { r: number; g: number; b: number }) => Promise<Buffer>;
+  }): Promise<{ png: Buffer | null; reason: string }> {
+    if (!this.enabled) return { png: null, reason: 'enhancement is switched off' };
+
+    let sign = PNG.sync.read(input.signLayer);
+    try {
+      const ground = await this.enhanceGround(input, sign.width, sign.height);
+
+      if (input.relight) {
+        // Half the measured cast, not all of it: what is measured is the
+        // wall's light AND the wall's own colour, and applying the lot dips
+        // the sign in the paint of the building behind it.
+        const measured = temper(
+          measureIlluminant(ground.data, ground.width, ground.height),
+          0.5,
+        );
+        try {
+          sign = PNG.sync.read(await input.relight(measured.gain));
+        } catch (error) {
+          this.logger.warn(
+            `relight skipped, using the neutral sign layer: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      const merged = this.seatSign(sign, ground, input.view, input.spec);
+      if (!merged.ok) {
+        this.logger.error(`layered night discarded: ${merged.reason}`);
+        return { png: null, reason: `layered night discarded — ${merged.reason}` };
+      }
+
+      this.logger.log(
+        `layered night: ${merged.compared} sign pixels verified unchanged`,
+      );
+      return {
+        png: merged.png,
+        reason: 'The wall behind the sign was rendered here, then passed to a generative '
+          + 'model for material and lighting realism. The sign itself never went to the '
+          + 'model: it is the deterministic render, composited back over that wall by this '
+          + 'machine and verified against the specification pixel for pixel. The glow it '
+          + 'casts on the wall, and the light the wall casts back onto it, are computed '
+          + 'rather than drawn.',
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`layered night skipped: ${message}`);
+      return { png: null, reason: 'a layered night panel was not available' };
+    }
+  }
+
+  /**
+   * Seats a rendered sign onto a ground and proves it survived.
+   *
+   * Ground, contact occlusion, sign — and the spill only AFTER the check. The
+   * check asks one question, "did the ground alter the sign", and bloom falls
+   * across the sign as well as around it, so adding it first would fail the
+   * check on our own arithmetic rather than on anything the model did.
+   */
+  private seatSign(
+    sign: PNG,
+    ground: PNG,
+    view: 'day' | 'night',
+    spec: SignSpec,
+  ): { ok: true; png: Buffer; compared: number } | { ok: false; reason: string } {
+    const alpha = new Uint8Array(sign.width * sign.height);
+    for (let i = 0; i < alpha.length; i++) alpha[i] = sign.data[i * 4 + 3]!;
+
+    const standoff = Math.max(...spec.elements.map((e) => e.returnDepth ?? 5), 1);
+    const radius = Math.max(3, Math.min(48, (sign.width / 90) * standoff * 0.35));
+
+    const seated = integrate(
+      new Uint8ClampedArray(ground.data),
+      new Uint8ClampedArray(sign.data),
+      sign.width,
+      sign.height,
+      { occlusion: contactOcclusion(alpha, sign.width, sign.height, radius, view === 'night' ? 0.28 : 0.45) },
+    );
+
+    const check = verifyCompositedSign(
+      { width: sign.width, height: sign.height, data: sign.data },
+      { width: sign.width, height: sign.height, data: seated },
+    );
+    if (!check.ok) return { ok: false, reason: check.reason ?? 'the sign did not survive the composite' };
+
+    const merged = view === 'night'
+      ? applySpill(seated, sign.width, sign.height, lightSpill(
+          sign.data, sign.width, sign.height,
+          // Tight and short. The spill is the light the sign throws PAST itself,
+        // and a wide soft one reads as fog around the letters rather than as a
+        // sign lighting a wall — the same failure the halo itself had.
+        { tight: Math.max(4, radius * 0.4), wide: Math.max(12, radius * 1.8), strength: 0.45 },
+        ), alpha)
+      : seated;
+
+    const out = new PNG({ width: sign.width, height: sign.height });
+    out.data = Buffer.from(merged);
+    return { ok: true, png: PNG.sync.write(out), compared: check.compared };
+  }
+
+  /**
+   * The rendered wall, made real by a model.
+   *
+   * An edit call with no mask, on a picture with no sign in it — so there is
+   * nothing in the frame for a model to redraw wrongly, and the prompt spends
+   * its words on the wall instead of on protecting the copy. What comes back
+   * is resampled to the panel and used as ground, never as sign.
+   */
+  private async enhanceGround(
+    input: { background: Buffer; view: 'day' | 'night'; spec: SignSpec; onPhotograph?: boolean },
+    width: number,
+    height: number,
+  ): Promise<PNG> {
+    const client = this.getClient();
+    const result = await client.images.edit(
+      {
+        model: this.config.get<string>('enhance.model') ?? 'gpt-image-1',
+        image: await toFile(input.background, 'ground.png', { type: 'image/png' }),
+        prompt: this.groundPrompt(input),
+        size: pickEditSize(width, height) as never,
+        n: 1,
+      },
+      { timeout: this.config.get<number>('enhance.timeoutMs') ?? 90_000 },
+    );
+
+    const b64 = result.data?.[0]?.b64_json;
+    if (!b64) throw new Error('the image endpoint returned no image');
+    return resample(PNG.sync.read(Buffer.from(b64, 'base64')), width, height);
+  }
+
+  /**
+   * What to say about a wall with nothing on it.
+   *
+   * The negatives carry most of the weight. Given an empty wall lit from one
+   * side, a model's first instinct is to put something there — a sign, a
+   * letter, a light fitting — because an empty frame reads as unfinished. The
+   * sign is added afterwards, by this machine, and anything the model draws in
+   * that space becomes a second sign behind the real one.
+   */
+  private groundPrompt(input: { view: 'day' | 'night'; spec: SignSpec; onPhotograph?: boolean }): string {
+    const surface = input.spec.mountingSurface?.kind ?? 'wall';
+
+    // A photograph is the customer's own building, and the job is to relight
+    // it rather than to invent a wall. Everything that identifies the place —
+    // its geometry, its materials, its openings — has to survive, or the proof
+    // shows a night view of somewhere else.
+    if (input.onPhotograph) {
+      return [
+        'This is a photograph of a real building, taken in daylight, with no sign on it yet.',
+        input.view === 'night'
+          ? 'Show the same building at night. Keep every architectural detail exactly as it is — '
+            + 'the same geometry, the same openings, the same materials, the same framing and '
+            + 'perspective, nothing moved, added or removed. Only the light changes: a dark, '
+            + 'evenly lit facade under soft ambient street light, with the material texture still '
+            + 'legible in the dark, believable falloff into the corners, and no daylight left in '
+            + 'the sky or on the surfaces.'
+          : 'Keep the building exactly as it is and only improve the realism of its light and '
+            + 'material: true texture, believable ambient light and soft contact shadow.',
+        'There is exactly one light in this scene and it is the sign itself, which is composited '
+          + 'into the middle of the facade afterwards. So light the facade the way a lit sign '
+          + 'standing there would light it: a soft, warm pool centred on the middle of the frame, '
+          + 'brightest there and falling away smoothly to darkness at the edges, with the light '
+          + 'clearly coming from the front and centre rather than from any side. Do not draw a '
+          + 'second light source, a spotlight beam, a hotspot anywhere off-centre, or a visible '
+          + 'light fitting — a second light fighting the sign is what makes a composite look fake.',
+        'There must be NOTHING added to this building: no sign, no letters, no text, no numbers,',
+        'no logo, no panel, plaque, frame, border or box, no lamp, no people, no vehicles. The',
+        'building as photographed, at a different hour, is the correct and finished result.',
+      ].join('\n');
+    }
+
+    return [
+      `This is a render of an empty ${surface} with no sign on it. Make it look like a real`,
+      'photograph of that surface: real material and grain, believable imperfection, real',
+      'ambient light and colour temperature, natural falloff and soft shadowing.',
+      input.view === 'night'
+        ? 'It is night, and the only light in the scene is the sign that gets composited into the '
+          + 'middle of the frame afterwards. Light the wall the way that sign would light it: a '
+          + 'soft, warm pool centred in the frame, brightest at the centre and falling away to '
+          + 'darkness at the edges, the light plainly coming from the front and centre. No second '
+          + 'light source, no off-centre hotspot, no spotlight beam, no visible fitting.'
+        : 'It is daytime: soft natural light and believable shadow.',
+      'Keep the framing, perspective and proportions of the surface exactly as they are.',
+      'There must be NOTHING on this surface: no sign, no letters, no text, no numbers, no logo,',
+      'no panel, plaque, frame, border or box, no lamp or light fitting, no people. An empty',
+      'surface is the correct and finished result.',
+    ].join('\n');
+  }
+
   async conceptScene(input: {
     signLayer: Buffer;
     view: 'day' | 'night';
@@ -293,60 +520,17 @@ export class EnhanceService implements OnApplicationBootstrap {
     const sign = PNG.sync.read(input.signLayer);
     try {
       const setting = await this.generateSetting(input, sign.width, sign.height);
-
-      const alpha = new Uint8Array(sign.width * sign.height);
-      for (let i = 0; i < alpha.length; i++) alpha[i] = sign.data[i * 4 + 3]!;
-
-      // The same deterministic seating used on a real photograph: the wall
-      // darkens where the sign occludes it, and at night the sign lights it.
-      const standoff = Math.max(...input.spec.elements.map((e) => e.returnDepth ?? 5), 1);
-      const radius = Math.max(3, Math.min(48, (sign.width / 90) * standoff * 0.35));
-
-      // Setting, occlusion, sign — and NOT the spill yet. The check that
-      // follows asks one question: did the generated setting alter the sign?
-      // Bloom falls across the sign as well as around it, so adding it first
-      // would make every sign pixel differ and the check would fail on our own
-      // arithmetic rather than on anything the model did.
-      const seated = integrate(
-        new Uint8ClampedArray(setting.data),
-        new Uint8ClampedArray(sign.data),
-        sign.width,
-        sign.height,
-        {
-          occlusion: contactOcclusion(alpha, sign.width, sign.height, radius,
-            input.view === 'night' ? 0.28 : 0.45),
-        },
-      );
-
-      const check = verifyCompositedSign(
-        { width: sign.width, height: sign.height, data: sign.data },
-        { width: sign.width, height: sign.height, data: seated },
-      );
-      if (!check.ok) {
-        this.logger.error(`concept scene discarded: ${check.reason}`);
-        return { png: null, reason: `concept scene discarded — ${check.reason}` };
+      const merged = this.seatSign(sign, setting, input.view, input.spec);
+      if (!merged.ok) {
+        this.logger.error(`concept scene discarded: ${merged.reason}`);
+        return { png: null, reason: `concept scene discarded — ${merged.reason}` };
       }
-
-      // Verified. Now the sign may light its surroundings.
-      const merged = input.view === 'night'
-        ? applySpill(seated, sign.width, sign.height, lightSpill(
-            sign.data, sign.width, sign.height,
-            {
-              tight: Math.max(4, radius * 0.5),
-              wide: Math.max(16, radius * 3),
-              strength: 0.55,
-            },
-          ), alpha)
-        : seated;
-
-      const out = new PNG({ width: sign.width, height: sign.height });
-      out.data = Buffer.from(merged);
       this.logger.log(
-        `concept scene (${input.view}): ${check.compared} sign pixels verified unchanged`,
+        `concept scene (${input.view}): ${merged.compared} sign pixels verified unchanged`,
       );
 
       return {
-        png: PNG.sync.write(out),
+        png: merged.png,
         // Precise about the order of operations: the sign was verified against
         // the deterministic render BEFORE the glow was drawn over it, and the
         // glow is our own arithmetic rather than the model's. Claiming the

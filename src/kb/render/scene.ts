@@ -391,9 +391,14 @@ function buildHalo(
   // 3.2× the gap — measured against real output that left a visibly dark,
   // unlit band immediately around the letters before the bright ring began,
   // reading as a dark plaque sitting behind the sign rather than as the
-  // sign's own glow. 1.8× keeps the same falloff shape but starts it closer
-  // in, so the light reaches the letters' own edge instead of leaving a gap.
-  const reach = Math.max(standoff, 1.5) * 1.8;
+  // sign's own glow. 1.8× kept the same falloff shape but started it closer
+  // in, so the light reached the letters' own edge instead of leaving a gap.
+  //
+  // 1.1× now. A halo LED sits an inch and a half off the surface and throws a
+  // tight, bright collar around the letterform, not a wide lantern glow — the
+  // wide version read as fog and swallowed the edge of the copy, which is the
+  // one thing the halo is there to draw.
+  const reach = Math.max(standoff, 1.5) * 1.1;
 
   // Enough shells that the steps fall below what the eye separates. Six read
   // as concentric rings — a halo drawn as contour lines, not as light. More

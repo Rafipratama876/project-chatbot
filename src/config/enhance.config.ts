@@ -52,6 +52,22 @@ export default registerAs('enhance', () => ({
    */
   fullAi: process.env.ENHANCE_FULL_AI === 'true',
   /**
+   * How the night panel gets its realism.
+   *
+   *   'inpaint'  — the default. One image, masked: the sign's own pixels are
+   *                locked and restored, the ground around them is the model's.
+   *   'layered'  — three layers. The wall is rendered, sent to the model on its
+   *                own and comes back more real; the SIGN is rendered
+   *                separately and never leaves this machine; the two are added
+   *                back together here, deterministically, and the sign is
+   *                verified pixel for pixel afterwards. Costs one extra render
+   *                and buys a night panel a model cannot redraw the sign in.
+   *
+   * `ENHANCE_FULL_AI=true` still overrides both for the studio night pass and
+   * gives up the guarantee entirely — see `EnhanceService.enhanceFullAi`.
+   */
+  nightMode: process.env.ENHANCE_NIGHT_MODE === 'layered' ? 'layered' as const : 'inpaint' as const,
+  /**
    * A panel whose editable area is below this fraction is skipped: there is
    * nothing worth a round trip, and every call is a chance to fail.
    */

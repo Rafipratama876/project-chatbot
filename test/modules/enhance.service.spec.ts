@@ -264,3 +264,148 @@ describe('what the prompts say about a backer at night', () => {
     expect(prompt(service(), 'realismPrompt', input)).not.toMatch(/lightbox/);
   });
 });
+
+describe('the layered night panel', () => {
+  const spec3 = {
+    jobId: 'j',
+    businessName: 'B',
+    type: 'CL-T-02',
+    elements: [{ returnDepth: 5 }],
+    backer: { present: true },
+    mountingSurface: { kind: 'wall' },
+  } as unknown as SignSpec;
+
+  /** A wall the "model" handed back: plain grey, nothing on it. */
+  const groundPng = () => png(() => [40, 40, 40, 255]);
+  /** The sign on transparency, as `__renderLayers` produces it. */
+  const signLayerPng = () => png((x, y) => (inSign(x, y) ? [77, 20, 140, 255] : [0, 0, 0, 0]));
+
+  const withGround = (svc: EnhanceService, image: Buffer) => {
+    vi.spyOn(svc as never, 'enhanceGround' as never).mockImplementation((async () =>
+      PNG.sync.read(image)) as never);
+  };
+
+  it('is off unless it is asked for', () => {
+    expect(service().nightMode).toBe('inpaint');
+    expect(service({ 'enhance.nightMode': 'layered' }).nightMode).toBe('layered');
+  });
+
+  it('composites the rendered sign over the model\'s wall and verifies it', async () => {
+    const svc = service({ 'enhance.nightMode': 'layered' });
+    withGround(svc, groundPng());
+
+    const out = await svc.layeredNight({
+      signLayer: signLayerPng(), background: groundPng(), view: 'night', spec: spec3,
+    });
+
+    expect(out.png).not.toBeNull();
+    // The claim on the proof has to be the one that was actually kept: the
+    // sign never went to the model, and the glow is our arithmetic.
+    expect(out.reason).toMatch(/sign itself never went to the model/);
+    expect(out.reason).toMatch(/verified against the specification pixel for pixel/);
+
+    // The sign's own pixels survive the seating. Within a unit or two, not
+    // exactly: the glow is added AFTER the verification and carries a little
+    // of its own light back across the sign, which is what a real one does.
+    const result = PNG.sync.read(out.png!);
+    const i = ((SIGN.y0 + 2) * result.width + (SIGN.x0 + 2)) * 4;
+    expect(result.data[i]).toBeCloseTo(77, -0.5);
+    expect(result.data[i + 1]).toBeCloseTo(20, -0.5);
+    expect(result.data[i + 2]).toBeCloseTo(140, -0.5);
+  });
+
+  it('hands back nothing rather than a panel it could not build', async () => {
+    const svc = service({ 'enhance.nightMode': 'layered' });
+    vi.spyOn(svc as never, 'enhanceGround' as never).mockImplementation((() => {
+      throw new Error('the image endpoint returned no image');
+    }) as never);
+
+    const out = await svc.layeredNight({
+      signLayer: signLayerPng(), background: groundPng(), view: 'night', spec: spec3,
+    });
+    expect(out.png).toBeNull();
+    expect(out.reason).toMatch(/not available/);
+  });
+
+  it('tells the model the wall is empty and must stay empty', () => {
+    const svc = service({ 'enhance.nightMode': 'layered' });
+    const text = (svc as unknown as Record<string, (i: unknown) => string>).groundPrompt!(
+      { view: 'night', spec: spec3 },
+    );
+    // An empty frame reads as unfinished, and a model's first instinct is to
+    // fill it — with a sign, which is the one thing composited in afterwards.
+    expect(text).toMatch(/no sign, no letters, no text/);
+    expect(text).toMatch(/An empty/);
+    // The sign IS the light, and it lands in the middle — so the wall is asked
+    // for a pool centred there rather than for no light at all.
+    expect(text).toMatch(/soft, warm pool centred in the frame/);
+    expect(text).toMatch(/No second light source/);
+  });
+
+  it('asks a photograph to be relit, not reinvented', () => {
+    const svc = service({ 'enhance.nightMode': 'layered' });
+    const text = (svc as unknown as Record<string, (i: unknown) => string>).groundPrompt!(
+      { view: 'night', spec: spec3, onPhotograph: true },
+    );
+    // The frame is the customer's own building. Everything that identifies the
+    // place has to survive, or the proof shows a night view of somewhere else.
+    expect(text).toMatch(/Show the same building at night/);
+    expect(text).toMatch(/nothing moved, added or removed/);
+    expect(text).toMatch(/no sign, no letters, no text/);
+    // And the light stays where the sign is going, so the two do not fight.
+    expect(text).toMatch(/soft, warm pool centred on the middle of the frame/);
+    expect(text).toMatch(/Do not draw a second light source/);
+  });
+});
+
+describe('matching the sign to the wall it was given', () => {
+  const spec4 = {
+    jobId: 'j', businessName: 'B', type: 'CL-T-02',
+    elements: [{ returnDepth: 5 }], backer: { present: true },
+    mountingSurface: { kind: 'wall' },
+  } as unknown as SignSpec;
+  const signLayerPng = () => png((x, y) => (inSign(x, y) ? [77, 20, 140, 255] : [0, 0, 0, 0]));
+
+  it('measures the finished wall and renders the sign again under that light', async () => {
+    const svc = service({ 'enhance.nightMode': 'layered' });
+    // A warm wall: a sodium-lit street, in the crudest possible form.
+    vi.spyOn(svc as never, 'enhanceGround' as never).mockImplementation((async () =>
+      PNG.sync.read(png(() => [120, 70, 30, 255]))) as never);
+
+    let asked: { r: number; g: number; b: number } | null = null;
+    await svc.layeredNight({
+      signLayer: signLayerPng(),
+      background: png(() => [40, 40, 40, 255]),
+      view: 'night',
+      spec: spec4,
+      relight: async (gain) => {
+        asked = gain;
+        return signLayerPng();
+      },
+    });
+
+    expect(asked, 'the sign should be rendered again under the measured light').not.toBeNull();
+    // Warm: red above neutral, blue below. Tempered, so neither goes the whole
+    // way — the measured cast is the wall's own colour as much as its light.
+    expect(asked!.r).toBeGreaterThan(1);
+    expect(asked!.b).toBeLessThan(1);
+    expect(asked!.r).toBeLessThan(2);
+  });
+
+  it('keeps the neutral sign when the second render fails', async () => {
+    const svc = service({ 'enhance.nightMode': 'layered' });
+    vi.spyOn(svc as never, 'enhanceGround' as never).mockImplementation((async () =>
+      PNG.sync.read(png(() => [40, 40, 40, 255]))) as never);
+
+    const out = await svc.layeredNight({
+      signLayer: signLayerPng(),
+      background: png(() => [40, 40, 40, 255]),
+      view: 'night',
+      spec: spec4,
+      relight: async () => { throw new Error('the page went away'); },
+    });
+
+    // A relight that fails costs the panel its light matching, not the panel.
+    expect(out.png).not.toBeNull();
+  });
+});

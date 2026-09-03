@@ -4,10 +4,29 @@
  */
 import * as THREE from 'three';
 import type { SignSpec } from '../domain/spec.js';
+import { TYPES } from '../domain/taxonomy.js';
 import type { View } from './materials.js';
 import type { Rgb } from './integrate.js';
 
 const RIG = '__cl_lighting_rig__';
+
+/**
+ * The colour the sign throws, from the LED it was specified with.
+ *
+ * Warm white when nothing says otherwise — the default LED in §8.1 — and the
+ * specified colour when there is one, because a red-lit sign does not wash a
+ * wall in white.
+ */
+function resolveLedColour(spec: SignSpec): THREE.Color {
+  const led = spec.elements.find((e) => e.lit)?.ledColour;
+  const colour = new THREE.Color(0xfff1dc);
+  if (!led) return colour;
+  try {
+    return new THREE.Color(led.toLowerCase().replace(/[^a-z]/g, ''));
+  } catch {
+    return colour;
+  }
+}
 
 /**
  * Tints a light by the photograph's own illuminant.
@@ -123,6 +142,75 @@ export function applyEnvironment(
     );
     rim.target.position.set(spec.overall.w / 2, spec.overall.h / 2, 0);
     rig.add(rim.target);
+
+    // The sign is the light source, and it is in the middle of the frame.
+    //
+    // At night nothing else in the picture is lit: the faces emit, and an
+    // emissive material in three.js illuminates nothing at all — so the wall
+    // and the pan behind the copy received no light from the one thing in the
+    // scene that is actually shining. That is why a night panel needed a
+    // painted-on wash to look right, and why the wash never quite agreed with
+    // whatever a generative pass drew behind it.
+    //
+    // A real lamp at the sign's own position fixes both. It sits centre-front,
+    // where the copy is, so the pool it throws is centred under the sign by
+    // construction rather than by tuning — the direction is not measured
+    // because it is not in doubt.
+    const emits = spec.elements.some((e) => e.lit);
+    if (emits) {
+      const rearLit = TYPES[spec.type].rearIlluminated;
+      const depth = Math.max(...spec.elements.map((e) => e.returnDepth ?? 5), 3);
+      const cap = Math.max(...spec.elements.map((e) => e.capHeight), 6);
+      const colour = resolveLedColour(spec);
+
+      if (rearLit) {
+        // A halo letter's LEDs face BACKWARDS, into the standoff gap, and they
+        // run the length of the copy. One lamp at the centre is not that: with
+        // physical falloff it lights the middle of the word and leaves the ends
+        // dark, so "FedEx" glowed behind "ed" and nowhere else.
+        //
+        // So the light is spread across the copy at the gap depth, roughly one
+        // per letter-height, and the copy itself blocks it — which is what
+        // draws the halo rather than painting one on.
+        // Close to the surface, not halfway across the gap. The LEDs sit on
+        // the back of the can, and how tight the halo reads is set by that
+        // distance: brightness falls with 1/(gap² + d²), so a lamp an inch off
+        // the wall is dim four inches away, where one four inches off is not.
+        const gap = Math.max(depth * 0.14, 0.5);
+        const count = Math.min(14, Math.max(3, Math.round((spec.overall.w / cap) * 2)));
+        // Enough to land at full brightness on a surface a gap away, given the
+        // inverse-square falloff below, and divided among the lamps so a long
+        // sign does not end up brighter than a short one.
+        const each = (gap * gap * 260) / Math.sqrt(count);
+
+        for (let i = 0; i < count; i++) {
+          const t = count === 1 ? 0.5 : i / (count - 1);
+          // No distance clamp: three.js cuts a clamped light off at a hard
+          // edge, and a lit ring with a rim around it is worse than a wide
+          // one. Inverse-square from an inch and a half is already tight.
+          const lamp = new THREE.PointLight(colour, each, 0, 2);
+          lamp.position.set(spec.overall.w * (0.04 + 0.92 * t), spec.overall.h / 2, gap);
+          lamp.castShadow = true;
+          lamp.shadow.mapSize.set(512, 512);
+          lamp.shadow.camera.near = 0.2;
+          lamp.shadow.camera.far = cap * 4;
+          lamp.shadow.bias = -0.002;
+          rig.add(lamp);
+        }
+      } else {
+        // Front lit: the light leaves the faces towards the viewer, and what
+        // reaches the wall is spill. One soft source in front of the copy.
+        const reach = Math.max(spec.overall.w, spec.overall.h) * 1.6;
+        const glow = new THREE.PointLight(
+          colour,
+          Math.max(spec.overall.w, spec.overall.h) * 0.9,
+          reach,
+          2,
+        );
+        glow.position.set(spec.overall.w / 2, spec.overall.h / 2, depth * 0.6);
+        rig.add(glow);
+      }
+    }
 
     rig.add(ambient, street, rim);
   }

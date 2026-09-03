@@ -10,7 +10,7 @@
 import * as THREE from 'three';
 import type { SignSpec } from '../domain/spec.js';
 import { buildSignScene, isHaloGround, type SceneMode } from './scene.js';
-import { makeCamera, panelsFor, type PanelRequest } from './views.js';
+import { makeCamera, panelsFor, type PanelRequest, type ViewName } from './views.js';
 import {
   calibrate, fitArtwork, anchorPx, artworkExtent, solveHomography, applyHomography,
 } from '../geometry/calibration.js';
@@ -19,7 +19,7 @@ import { panelGround, groundNote } from './panelPlan.js';
 import { buildEnvironment } from './environment.js';
 import {
   contactOcclusion, lightSpill, integrate, applySpill, measureIlluminant, temper,
-  vignette, blur,
+  vignette, blur, luma,
 } from './integrate.js';
 
 export interface RenderedPanel {
@@ -29,6 +29,13 @@ export interface RenderedPanel {
   dataUrl: string;
   /** Set when the panel could not use the photograph, saying why. */
   note?: string | null;
+  /**
+   * The same panel as two pictures instead of one: the customer's photograph
+   * framed exactly as this panel frames it, and the sign alone on transparency
+   * in its place on that frame. Only for a panel that sits on a photograph,
+   * and only when asked for — see `RenderOptions.layers`.
+   */
+  layers?: { background: string; sign: string } | null;
   /** What a generative pass may touch in this panel. See `render/protect.ts`. */
   protection?: {
     /** The whole frame is the customer's site, so none of it is decoration. */
@@ -48,7 +55,18 @@ export interface RenderedPanel {
     logoCoverageUrl: string | null;
   };
 }
-export interface RenderOptions { width?: number; height?: number }
+export interface RenderOptions {
+  width?: number;
+  height?: number;
+  /**
+   * Also return each photograph panel as a background and a sign layer.
+   *
+   * For the layered night pass: only the background goes to a generative
+   * model, and the sign is composited back over it here. Off by default —
+   * it costs a second read of every composite panel.
+   */
+  layers?: boolean;
+}
 
 declare global {
   interface Window {
@@ -57,6 +75,16 @@ declare global {
       spec: SignSpec,
       opts: { width: number; height: number; view: 'day' | 'night' },
     ) => Promise<string>;
+    __renderLayers?: (
+      spec: SignSpec,
+      opts: {
+        width: number; height: number; view: 'day' | 'night'; camera?: ViewName;
+        /** Light measured off the finished ground, so the sign agrees with it. */
+        illuminant?: { r: number; g: number; b: number };
+        /** Skip the ground pass — used for the relit second sign render. */
+        signOnly?: boolean;
+      },
+    ) => Promise<{ sign: string; background: string }>;
   }
 }
 
@@ -224,6 +252,11 @@ async function render(spec: SignSpec, opts: RenderOptions = {}): Promise<Rendere
       camera: p.camera,
       note: groundNote(ground.reason),
       dataUrl,
+      // Only for a panel that is on the photograph: a studio panel's ground is
+      // a rendered wall, which `__renderLayers` already hands back separately.
+      layers: opts.layers && composite && photo
+        ? photoLayers(canvas, photo, spec, sprite?.inchesAcross ?? null, crop)
+        : null,
       // Where the sign actually landed in the finished panel, and whether the
       // panel is the customer's photograph. Both are known here and nowhere
       // else: the alpha is the renderer's own output, and reconstructing it
@@ -447,6 +480,73 @@ function integrateOnto(
   photo.data.set(merged);
   ctx.putImageData(photo, 0, 0);
   return out.toDataURL('image/png');
+}
+
+/**
+ * The photograph, framed exactly as a panel frames it, and the sign alone in
+ * its place on that frame.
+ *
+ * The two halves `compositeOnPhoto` normally adds together, handed back
+ * separately: for the layered pass only the background goes to a model, and
+ * the sign is composited back over what comes back. The photograph is NOT
+ * darkened for night here — the model is asked for the night version of this
+ * wall, and handing it one already dimmed by a flat black wash would have it
+ * work from a picture nobody took.
+ */
+function photoLayers(
+  signCanvas: HTMLCanvasElement,
+  photo: HTMLImageElement,
+  spec: SignSpec,
+  inchesAcross: number | null,
+  crop: { x: number; y: number; w: number; h: number } | null,
+): { background: string; sign: string } {
+  const p = spec.placement!;
+  const size = crop
+    ? (() => {
+        const target = Math.min(1400, p.imageWidth);
+        return { w: target, h: Math.round((crop.h / crop.w) * target) };
+      })()
+    : { w: p.imageWidth, h: p.imageHeight };
+
+  const bg = document.createElement('canvas');
+  bg.width = size.w;
+  bg.height = size.h;
+  const bc = bg.getContext('2d')!;
+  bc.imageSmoothingQuality = 'high';
+  if (crop) {
+    bc.drawImage(photo, crop.x, crop.y, crop.w, crop.h, 0, 0, size.w, size.h);
+  } else {
+    bc.drawImage(photo, 0, 0, size.w, size.h);
+  }
+
+  const layer = document.createElement('canvas');
+  layer.width = size.w;
+  layer.height = size.h;
+  const lc = layer.getContext('2d')!;
+  lc.imageSmoothingQuality = 'high';
+
+  if (inchesAcross === null) {
+    // Camera-matched: the render is already in the photograph's frame.
+    lc.drawImage(signCanvas, 0, 0, size.w, size.h);
+  } else {
+    // Straight-on render placed as a sprite at the size the calibration says
+    // it occupies — the same arithmetic `compositeOnPhoto` uses.
+    const cal = calibrate(
+      { a: p.reference.a, b: p.reference.b, inches: p.reference.inches, label: p.reference.label },
+      p.imageWidth, p.imageHeight,
+    );
+    const placement = { calibration: cal, rect: p.rect };
+    const fit = fitArtwork(artworkExtent(spec.elements), placement);
+    const ppi = cal.pixelsPerInch;
+    const spriteW = inchesAcross * ppi;
+    const spriteH = spriteW * (signCanvas.height / signCanvas.width);
+    const anchor = anchorPx(fit, placement);
+    const cx = anchor.x + (fit.width * ppi) / 2;
+    const cy = anchor.y - (fit.height * ppi) / 2;
+    lc.drawImage(signCanvas, cx - spriteW / 2, cy - spriteH / 2, spriteW, spriteH);
+  }
+
+  return { background: bg.toDataURL('image/png'), sign: layer.toDataURL('image/png') };
 }
 
 /**
@@ -691,11 +791,15 @@ function blurredHalo(
   // the wash reached almost to the plaque's own edge. A real halo is a
   // narrow bright rim hugging the letters that is mostly gone within a
   // letter-height or so; it does not fill a plaque the size of the sign.
+  // Weaker and shorter again, because it is no longer the whole halo: at night
+  // the sign now carries a real lamp in its own standoff gap, which lights the
+  // surface behind the copy and is blocked by the copy itself. This wash is
+  // only the bloom on top of that — a camera artefact, not the light.
   return lightSpill(pixels.data, width, height, {
     threshold: 10,
     tight: Math.max(3, Math.round(width * 0.004)),
-    wide: Math.max(12, Math.round(width * 0.028)),
-    strength: 0.75,
+    wide: Math.max(10, Math.round(width * 0.016)),
+    strength: 0.40,
   });
 }
 
@@ -975,3 +1079,96 @@ async function renderSignLayer(
 }
 
 if (typeof window !== 'undefined') window.__renderSignLayer = renderSignLayer;
+
+/**
+ * The sign and the ground it stands on, as two separate pictures.
+ *
+ * For the layered night panel: the setting goes to a model for realism and the
+ * SIGN never does, so nothing a model draws can end up being the sign. The two
+ * come off the same scene through the same camera, which is what lets them be
+ * added back together without anything being lined up by hand.
+ *
+ * The background carries the wall and nothing else — no letters, no backer, no
+ * halo. A model asked to make a wall look real will happily leave a sign it can
+ * see in the frame alone; asked to make a wall WITH a sign on it look real, it
+ * redraws the sign. Removing it is cheaper than asking.
+ */
+async function renderLayers(
+  spec: SignSpec,
+  opts: {
+    width: number; height: number; view: 'day' | 'night'; camera?: ViewName;
+    illuminant?: { r: number; g: number; b: number };
+    signOnly?: boolean;
+  },
+): Promise<{ sign: string; background: string }> {
+  const { width, height, view } = opts;
+  const camera = opts.camera ?? 'detail-perspective';
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const renderer = new THREE.WebGLRenderer({
+    canvas, antialias: true, preserveDrawingBuffer: true, alpha: true,
+  });
+  renderer.setSize(width, height, false);
+  renderer.setClearColor(0x000000, 0);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.localClippingEnabled = true;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
+
+  const grab = (): string => {
+    const out = document.createElement('canvas');
+    out.width = width;
+    out.height = height;
+    out.getContext('2d')!.drawImage(canvas, 0, 0);
+    return out.toDataURL('image/png');
+  };
+
+  // The sign alone, on transparency. Composite mode so the studio wall is a
+  // shadow catcher and does not show through the counters of the letterforms.
+  const signScene = buildSignScene(spec, 'composite', opts.illuminant, buildEnvironment(renderer));
+  signScene.setView(view);
+  signScene.setSurface('composite');
+  const cam = makeCamera(signScene, camera, width, height).camera;
+
+  // No halo geometry in this path.
+  //
+  // The shells are twenty-eight stacked offset outlines, and summed they fill
+  // SOLID out to the halo's whole reach — so drawn into the frame they are not
+  // a glow at all, they are a white plaque the shape of the copy sitting behind
+  // it. Blurring them does not rescue that: the source is solid, so the blur
+  // keeps a solid core and only softens its rim.
+  //
+  // The light here is a real one instead. `applyEnvironment` puts a lamp in the
+  // standoff gap of a rear-illuminated sign; the copy blocks it, and what lands
+  // on the surface behind is a physical falloff rather than a drawing of one.
+  setHaloVisible(signScene.scene, false);
+  renderer.render(signScene.scene, cam);
+  setHaloVisible(signScene.scene, true);
+  const sign = grab();
+  signScene.dispose();
+
+  if (opts.signOnly) {
+    renderer.dispose();
+    return { sign, background: '' };
+  }
+
+  // The same scene, same camera, with everything but the mounting surface
+  // hidden — so the wall is lit and framed exactly as it is under the sign.
+  const groundScene = buildSignScene(spec, 'studio', undefined, buildEnvironment(renderer));
+  groundScene.setView(view);
+  groundScene.scene.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (mesh.isMesh && !/mounting surface/i.test(o.name)) mesh.visible = false;
+  });
+  renderer.render(groundScene.scene, cam);
+  const background = grab();
+  groundScene.dispose();
+
+  renderer.dispose();
+  return { sign, background };
+}
+
+if (typeof window !== 'undefined') window.__renderLayers = renderLayers;

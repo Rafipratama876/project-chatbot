@@ -108,7 +108,19 @@ export class RenderService implements OnModuleDestroy {
           dataUrl: p.dataUrl, note: p.note ?? null, enhanced: null,
         };
 
-        if (this.enhance.enabled) {
+        // The layered night path: the wall goes to the model, the sign never
+        // does, and the two are added back together here. Chosen per panel
+        // rather than per job — the day panel is a composite on the customer's
+        // own photograph and has no rendered wall to replace.
+        const layered = this.enhance.enabled
+          && this.enhance.nightMode === 'layered'
+          && p.view === 'night'
+          && !(p.protection?.onPhotograph ?? false);
+
+        if (layered) {
+          const outcome = await this.layeredNight(page, spec, p.camera, outDir, p.view);
+          if (outcome) panel.enhanced = outcome;
+        } else if (this.enhance.enabled) {
           const coverageUrl = p.protection?.coverageUrl ?? null;
           const logoCoverageUrl = p.protection?.logoCoverageUrl ?? null;
           const outcome = await this.enhance.enhance({
@@ -173,6 +185,66 @@ export class RenderService implements OnModuleDestroy {
    * afterwards, then checked pixel for pixel. That is what makes it impossible
    * for the result to contain a logo the model invented.
    */
+  /**
+   * A night panel built from three layers instead of one image.
+   *
+   * Renders the sign and the wall separately through the same camera, sends
+   * only the wall away, composites here and verifies the sign afterwards. A
+   * failure at any step returns null and the deterministic panel stands — a
+   * presentation layer is never allowed to cost a proof its evidence.
+   */
+  private async layeredNight(
+    page: Page,
+    spec: SignSpec,
+    camera: string,
+    outDir: string,
+    view: 'day' | 'night',
+  ): Promise<RenderedProofPanel['enhanced']> {
+    const width = this.config.get<number>('render.width') ?? 1600;
+    const height = this.config.get<number>('render.height') ?? 1000;
+
+    try {
+      const layers = (await page.evaluate(
+        ([s, o]) => (window as unknown as {
+          __renderLayers: (spec: unknown, opts: unknown) => Promise<{ sign: string; background: string }>;
+        }).__renderLayers(s, o),
+        [spec, { width, height, view, camera }] as const,
+      )) as { sign: string; background: string };
+
+      const result = await this.enhance.layeredNight({
+        signLayer: Buffer.from(layers.sign.split(',')[1]!, 'base64'),
+        background: Buffer.from(layers.background.split(',')[1]!, 'base64'),
+        view,
+        spec,
+        // The second render: the same sign under the light measured off the
+        // finished wall, so the two layers agree about where the light is.
+        relight: async (illuminant) => {
+          const relit = (await page.evaluate(
+            ([s, o]) => (window as unknown as {
+              __renderLayers: (spec: unknown, opts: unknown) => Promise<{ sign: string }>;
+            }).__renderLayers(s, o),
+            [spec, { width, height, view, camera, illuminant, signOnly: true }] as const,
+          )) as { sign: string };
+          return Buffer.from(relit.sign.split(',')[1]!, 'base64');
+        },
+      });
+      if (!result.png) return null;
+
+      const file = path.join(outDir, `${spec.jobId}-${view}-${camera}-layered.png`);
+      await fs.writeFile(file, result.png);
+      return {
+        file,
+        dataUrl: `data:image/png;base64,${result.png.toString('base64')}`,
+        reason: result.reason,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `layered night skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
   private async conceptScene(
     page: Page,
     spec: SignSpec,

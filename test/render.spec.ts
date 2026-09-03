@@ -710,3 +710,57 @@ describe('§9.2 where the halo lands when there is a backer', () => {
     sign.dispose();
   });
 });
+
+describe('§9.2 at night the sign is the light in the frame', () => {
+  it('lights a halo sign from inside its own standoff gap, along the copy', async () => {
+    // Emissive materials illuminate nothing, so before this the one shining
+    // object in a night scene threw no light at all: the surface behind the
+    // copy stayed black and the halo had to be drawn as geometry — twenty-eight
+    // stacked outlines that sum to a solid plaque rather than to light.
+    const { spec } = await runEngine(haloFlush());
+    const sign = buildSignScene(spec, 'studio');
+    sign.setView('night');
+
+    const lamps: THREE.PointLight[] = [];
+    sign.scene.traverse((o) => {
+      const l = o as THREE.PointLight;
+      if (l.isPointLight) lamps.push(l);
+    });
+
+    // Spread along the copy, not one at the centre: with physical falloff a
+    // single lamp lights the middle of a word and leaves both ends dark.
+    expect(lamps.length).toBeGreaterThan(2);
+    const xs = lamps.map((l) => l.position.x);
+    expect(Math.min(...xs)).toBeLessThan(spec.overall.w * 0.25);
+    expect(Math.max(...xs)).toBeGreaterThan(spec.overall.w * 0.75);
+
+    for (const lamp of lamps) {
+      // In the gap between the copy and what it stands on, in front of that
+      // surface and behind the faces.
+      expect(lamp.position.z).toBeGreaterThan(0);
+      expect(lamp.position.z).toBeLessThan(spec.elements[0]!.returnDepth ?? 5);
+      // The copy has to be what stops the light. Without shadows it is a wash.
+      expect(lamp.castShadow).toBe(true);
+    }
+    sign.dispose();
+  });
+
+  it('and no such lamp by day, or on a sign that does not light', async () => {
+    const { spec } = await runEngine(haloFlush());
+    const sign = buildSignScene(spec, 'studio');
+    sign.setView('day');
+
+    let lamps = 0;
+    sign.scene.traverse((o) => { if ((o as THREE.PointLight).isPointLight) lamps++; });
+    expect(lamps).toBe(0);
+    sign.dispose();
+
+    const unlit = await runEngine(nonLitTagline());
+    const dark = buildSignScene(unlit.spec, 'studio');
+    dark.setView('night');
+    let darkLamps = 0;
+    dark.scene.traverse((o) => { if ((o as THREE.PointLight).isPointLight) darkLamps++; });
+    expect(darkLamps).toBe(0);
+    dark.dispose();
+  });
+});
