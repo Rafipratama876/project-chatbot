@@ -16,7 +16,9 @@ import {
 } from '#/modules/database/entities/compat-session.entity.js';
 import type { JobInput, PlacementInput } from '#/kb/domain/spec.js';
 import type { ProofEntity } from '#/modules/database/entities/proof.entity.js';
-import { parseCompatProjectJson } from './compat.mapper.js';
+import { parseCompatProjectJson, type CompatProject } from './compat.mapper.js';
+import { RenderBundleService } from './render-bundle.service.js';
+import type { RenderBundle } from './render-bundle.js';
 
 const MAX_ASSET_BYTES = 20 * 1024 * 1024;
 const FETCH_TIMEOUT_MS = 20_000;
@@ -29,6 +31,7 @@ export class CompatService {
     private readonly artwork: ArtworkService,
     private readonly proofs: ProofsService,
     private readonly config: ConfigService,
+    private readonly bundles: RenderBundleService,
   ) {}
 
   personalities() {
@@ -46,30 +49,8 @@ export class CompatService {
     });
     if (duplicate) throw new ConflictException('Session already exists for this project and sign detail');
 
-    const [logo, wall] = await Promise.all([
-      fetchAsset(project.logoUrl, 'logo'),
-      fetchAsset(project.wallUrl, 'wall'),
-    ]);
-    const wallSize = StorageService.measure(wall.buffer, wall.mime);
-    const placement = scalePlacement(project.placement, wallSize.width, wallSize.height);
-    placement.backgroundImage = `data:${wall.mime};base64,${wall.buffer.toString('base64')}`;
-
-    const source = readSource(logo.mime === 'image/svg+xml'
-      ? { svg: logo.buffer.toString('utf8') }
-      : { data: logo.buffer.toString('base64'), mime: logo.mime });
-    const placed = this.artwork.place(source, placement, { name: project.logoText });
     const id = randomUUID();
-    const baseJob: JobInput = {
-      jobId: `${id}-v1`,
-      form: project.form,
-      artwork: placed.items,
-      placement,
-      artworkProvenance: {
-        source: placed.source,
-        confidence: placed.confidence,
-        notes: [...placed.warnings, ...placed.calibrationWarnings.map((warning) => warning.message)],
-      },
-    };
+    const baseJob = await this.buildJob(project, `${id}-v1`);
 
     const session = this.sessions.create({
       id,
@@ -87,6 +68,56 @@ export class CompatService {
 
   async get(id: string): Promise<Record<string, unknown>> {
     return this.sessionDto(await this.requireSession(id));
+  }
+
+  /**
+   * All six gates, then the bundle. No session, no board, no image model.
+   *
+   * The board is skipped rather than thrown away: composing one costs a
+   * Chromium screenshot and, when the photorealism pass is on, two paid image
+   * calls — all of it discarded by a caller that lays out its own proof.
+   */
+  async renderBundle(projectJson: unknown): Promise<RenderBundle> {
+    const project = parseCompatProjectJson(projectJson);
+    const job = await this.buildJob(project, `${randomUUID()}-bundle`);
+    const proof = await this.proofs.create(job, { skipBoard: true });
+    return this.bundles.build(proof);
+  }
+
+  /**
+   * Downloads the customer's assets, calibrates the placement against the real
+   * pixel size of the wall photograph, measures the artwork, and returns the
+   * job the gates run on.
+   *
+   * Separate from `create` because a job is not a session: the render-bundle
+   * path needs exactly this and nothing else, and reproducing it would give
+   * two intakes that could disagree about what the customer ordered.
+   */
+  async buildJob(project: CompatProject, jobId: string): Promise<JobInput> {
+    const [logo, wall] = await Promise.all([
+      fetchAsset(project.logoUrl, 'logo'),
+      fetchAsset(project.wallUrl, 'wall'),
+    ]);
+    const wallSize = StorageService.measure(wall.buffer, wall.mime);
+    const placement = scalePlacement(project.placement, wallSize.width, wallSize.height);
+    placement.backgroundImage = `data:${wall.mime};base64,${wall.buffer.toString('base64')}`;
+
+    const source = readSource(logo.mime === 'image/svg+xml'
+      ? { svg: logo.buffer.toString('utf8') }
+      : { data: logo.buffer.toString('base64'), mime: logo.mime });
+    const placed = this.artwork.place(source, placement, { name: project.logoText });
+
+    return {
+      jobId,
+      form: project.form,
+      artwork: placed.items,
+      placement,
+      artworkProvenance: {
+        source: placed.source,
+        confidence: placed.confidence,
+        notes: [...placed.warnings, ...placed.calibrationWarnings.map((warning) => warning.message)],
+      },
+    };
   }
 
   async send(id: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {

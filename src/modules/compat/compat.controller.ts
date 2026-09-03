@@ -39,6 +39,22 @@ export class CompatController {
     return envelope(await this.compat.send(id, body));
   }
 
+  /**
+   * Runs a Project JSON through all six gates and returns the render bundle —
+   * the three.js captures, the measured drawings and the construction values —
+   * without composing a board.
+   *
+   * For a caller that owns its own presentation. No session row is created: a
+   * session exists to carry a revision conversation, and a caller that composes
+   * its own proof runs that conversation itself.
+   */
+  @Post('render-bundle')
+  async renderBundle(@Body() body: Record<string, unknown>, @Req() request: FastifyRequest) {
+    const input = request.isMultipart() ? await multipartFields(request) : body;
+    const raw = input.projectJson ?? input;
+    const projectJson = typeof raw === 'string' ? parseJson(raw) : raw;
+    return envelope(await this.compat.renderBundle(projectJson));
+  }
 }
 
 async function multipartFields(request: FastifyRequest): Promise<Record<string, unknown>> {
