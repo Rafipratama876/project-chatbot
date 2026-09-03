@@ -9,7 +9,7 @@
  */
 import * as THREE from 'three';
 import type { SignSpec } from '../domain/spec.js';
-import { buildSignScene, type SceneMode } from './scene.js';
+import { buildSignScene, isHaloGround, type SceneMode } from './scene.js';
 import { makeCamera, panelsFor, type PanelRequest } from './views.js';
 import {
   calibrate, fitArtwork, anchorPx, artworkExtent, solveHomography, applyHomography,
@@ -19,7 +19,7 @@ import { panelGround, groundNote } from './panelPlan.js';
 import { buildEnvironment } from './environment.js';
 import {
   contactOcclusion, lightSpill, integrate, applySpill, measureIlluminant, temper,
-  vignette,
+  vignette, blur,
 } from './integrate.js';
 
 export interface RenderedPanel {
@@ -38,6 +38,14 @@ export interface RenderedPanel {
      * mounting surface, both of which are specified. Null when not needed.
      */
     coverageUrl: string | null;
+    /**
+     * Greyscale PNG of CL-P-01 alone — the copy/logo face, per its own colour
+     * breaks. Tighter than `coverageUrl`: a model may repaint the returns,
+     * trim cap, backer and mounting surface for material and light, as long
+     * as it leaves this silhouette's pixels alone. Null on a photograph panel
+     * and wherever the render did not compute it.
+     */
+    logoCoverageUrl: string | null;
   };
 }
 export interface RenderOptions { width?: number; height?: number }
@@ -66,6 +74,10 @@ async function render(spec: SignSpec, opts: RenderOptions = {}): Promise<Rendere
   renderer.setClearColor(0x000000, 0);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // The halo is clipped to the panel it lands on — see `HaloClip` in scene.ts.
+  // Without this the planes are carried on the materials and ignored, and the
+  // glow paints past the edge of the pan onto nothing.
+  renderer.localClippingEnabled = true;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
 
   const photo = spec.placement ? await loadImage(spec.placement.backgroundImage) : null;
@@ -100,7 +112,12 @@ async function render(spec: SignSpec, opts: RenderOptions = {}): Promise<Rendere
 
   for (const p of panelsFor(sign.contract.views) as PanelRequest[]) {
     sign.setView(p.view);
-    renderer.toneMappingExposure = p.view === 'night' ? 1.35 : 1.0;
+    // Was 1.35 at night. That, combined with the old wide/strong halo, pushed
+    // most of a night studio panel toward flat white — a lit ROOM, not a dark
+    // storefront with one lit sign in it. Neutral exposure at both views
+    // now; the letters' own emissive material and the (now much tighter)
+    // halo are what carry the night look, not a blanket exposure lift.
+    renderer.toneMappingExposure = 1.0;
 
     // Both views go on the customer's building where the photograph supports
     // it. A night panel rendered in a studio answers a different question from
@@ -155,13 +172,51 @@ async function render(spec: SignSpec, opts: RenderOptions = {}): Promise<Rendere
       ? signCoverage(renderer, sign.scene, camera, width, height)
       : null;
 
+    // The tighter mask: just the copy/logo face, per CL-P-01. Captured before
+    // the real frame is drawn — it renders the scene itself, onto the same
+    // canvas, so it has to happen and be read before the pixels that matter
+    // are painted over it.
+    //
+    // Halo protection was tried both ways and neither is free of a real
+    // failure, observed on live output, not assumed:
+    //
+    //   Protected — the halo shells fill solid, not just a thin rim, so
+    //   locking them locks a large solid block the size of the halo's whole
+    //   reach. Its own colour there is dim (very low night ambient by
+    //   design), so the locked block reads as a dark plaque behind the
+    //   letters — structurally, not as a rendering fluke, and no amount of
+    //   retuning the halo's own reach or threshold changed that shape, only
+    //   its size.
+    //
+    //   Unprotected — the best material realism this pipeline has produced
+    //   (real brick, real brushed metal, real screws) came from exactly this
+    //   setting, at the cost that the model occasionally ghosts a faint,
+    //   duplicated echo of a letter into the glow next to the real one.
+    //
+    // On the client's explicit choice between the two, unprotected: the
+    // plaque read as obviously wrong every time, where the ghost is
+    // intermittent and a regenerate clears it.
+    const logoCoverageUrl = !composite && p.view === 'night'
+      ? logoCoverage(renderer, sign.scene, camera, width, height, false)
+      : null;
+
     setHaloVisible(sign.scene, glow === null);
     renderer.render(sign.scene, camera);
     setHaloVisible(sign.scene, true);
 
     const dataUrl = composite && photo
       ? compositeOnPhoto(canvas, photo, spec, p.view, sprite?.inchesAcross ?? null, crop)
-      : flattenOnto(canvas, p.view === 'night' ? '#0a0d12' : '#bcc7d1', p.view, glow, covered);
+      // Strictly neutral (R=G=B), not the near-black navy this used to be.
+      // HSL saturation is a ratio to lightness, so a hue that is invisible
+      // in a near-black fill (#0a0d12 carries a measured 29% "blue" at that
+      // darkness) stops being invisible the moment something brightens that
+      // pixel — and `preserveChroma` locks every editable pixel's hue to
+      // whatever the base had there, on purpose, so a `logoOnly` pass
+      // brightening this fill turns an imperceptible tint into a saturated
+      // colour. Observed on real output: a solid blue disc where a model had
+      // brightened a corner of exactly this fill. A true grey has no hue to
+      // amplify.
+      : flattenOnto(canvas, p.view === 'night' ? '#0b0b0b' : '#bcc7d1', p.view, glow, covered);
 
     panels.push({
       label: p.label,
@@ -176,8 +231,8 @@ async function render(spec: SignSpec, opts: RenderOptions = {}): Promise<Rendere
       // finished picture. Anything that later decides what a model may touch
       // has to be told, not left to infer.
       protection: composite && photo
-        ? { onPhotograph: true, coverageUrl: null }
-        : { onPhotograph: false, coverageUrl: alphaOf(canvas) },
+        ? { onPhotograph: true, coverageUrl: null, logoCoverageUrl: null }
+        : { onPhotograph: false, coverageUrl: alphaOf(canvas), logoCoverageUrl },
     });
   }
 
@@ -512,7 +567,13 @@ function signCoverage(
   scene.traverse((o) => {
     const mesh = o as THREE.Mesh;
     if (!mesh.isMesh || !mesh.visible) return;
-    if (/halo/i.test(mesh.name) || /mounting surface/i.test(mesh.name)) {
+    // The backer counts as ground here, not as sign. It is the surface the
+    // halo lands on — a rear-illuminated element standing on a pan throws its
+    // light onto that pan, and the letters block it. Counting the pan as
+    // covered suppressed the wash exactly where it belongs and left it only on
+    // the wall outside, so the glow appeared to come from behind the panel
+    // rather than from behind the copy.
+    if (isHaloGround(mesh.name)) {
       mesh.visible = false;
       hidden.push(mesh);
     }
@@ -535,6 +596,52 @@ function signCoverage(
   const alpha = new Uint8Array(width * height);
   for (let i = 0; i < alpha.length; i++) alpha[i] = pixels.data[i * 4 + 3]!;
   return alpha;
+}
+
+/**
+ * Alpha of CL-P-01 and the halo shells — the copy/logo face plus the light
+ * it casts, and nothing else the renderer drew.
+ *
+ * The face alone was the first version of this: only the mark's own outline
+ * and colour breaks need protecting, so the returns, trim cap, backer and
+ * mounting surface were left open for a model to relight. In practice the
+ * halo had to join it. It is exactly the region a model asked to add
+ * "realistic ambient light" reaches for first, and what came back there was
+ * not better light — it was a thin invented line traced along the glow's own
+ * edge, achromatic enough to survive the colour lock and structured enough to
+ * read as a mistake rather than texture. The halo is already a real light
+ * source, computed and blurred deterministically (see `blurredHalo`); handing
+ * it to a model a second time bought a defect, not an improvement, so it is
+ * protected alongside the face and the model's realism budget is spent on the
+ * surfaces around it instead — which is most of the panel.
+ */
+function logoCoverage(
+  renderer: THREE.WebGLRenderer,
+  scene: THREE.Scene,
+  camera: THREE.Camera,
+  width: number,
+  height: number,
+  includeHalo: boolean,
+): string {
+  const hidden: THREE.Object3D[] = [];
+  scene.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.visible) return;
+    const keep = /^CL-P-01 face/.test(mesh.name) || (includeHalo && /halo/i.test(mesh.name));
+    if (!keep) {
+      mesh.visible = false;
+      hidden.push(mesh);
+    }
+  });
+
+  const previous = scene.background;
+  scene.background = null;
+  renderer.render(scene, camera);
+  const url = alphaOf(renderer.domElement as HTMLCanvasElement);
+
+  scene.background = previous;
+  for (const o of hidden) o.visible = true;
+  return url;
 }
 
 /** Shows or hides every halo shell, so its wash can replace its geometry. */
@@ -579,18 +686,16 @@ function blurredHalo(
   scene.background = previous;
   for (const o of hidden) o.visible = true;
 
-  // Wide and soft. The radius is a fraction of the frame rather than of the
-  // sign: what is being modelled is how far light carries across a wall, and
-  // that does not shrink because the letters are small in shot.
+  // Cut hard, twice now. First pass (10.5%/1.6 → 6%/1.0) was still measured
+  // against a live render and still read as a lit backer, not a lit sign —
+  // the wash reached almost to the plaque's own edge. A real halo is a
+  // narrow bright rim hugging the letters that is mostly gone within a
+  // letter-height or so; it does not fill a plaque the size of the sign.
   return lightSpill(pixels.data, width, height, {
-    threshold: 8,
-    tight: Math.max(6, Math.round(width * 0.012)),
-    // Light carries a long way across a wall. Measured against a photograph of
-    // a halo sign the wash reaches well over a letter height before it is lost
-    // in the dark, where a tighter radius stops at the letterform and reads as
-    // an outline drawn around it rather than as illumination.
-    wide: Math.max(40, Math.round(width * 0.105)),
-    strength: 1.6,
+    threshold: 10,
+    tight: Math.max(3, Math.round(width * 0.004)),
+    wide: Math.max(12, Math.round(width * 0.028)),
+    strength: 0.75,
   });
 }
 
@@ -633,12 +738,51 @@ function flattenOnto(
     ctx.putImageData(frame, 0, 0);
   }
 
+  // A flat fill immediately around the sign, independent of the halo's own
+  // brightness curve — deterministic, not a generative model's opinion about
+  // what belongs there.
+  //
+  // The halo above lights the wall wherever a lit shell happens to land, and
+  // that turned out not to include the ground right next to the letters:
+  // measured on real output, the band between the letterform and the halo's
+  // own bright rim stayed close to black regardless of how the halo's own
+  // reach or threshold were tuned. A generative pass given that panel as its
+  // reference kept the same dark band even when told not to, because it is
+  // photographing what is actually there. This is the fix that is not a
+  // suggestion to a model: a small, unconditional lift within a couple of
+  // letter-heights of the sign, so the base panel itself no longer has a
+  // dark gap for anything downstream to preserve.
+  if (glow && covered && view === 'night') {
+    const w = out.width;
+    const h = out.height;
+    const alpha = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) alpha[i] = covered[i]! / 255;
+    const reach = Math.max(24, Math.round(w * 0.05));
+    const softened = blur(alpha, w, h, reach, 2);
+
+    const frame = ctx.getImageData(0, 0, w, h);
+    for (let i = 0; i < w * h; i++) {
+      const o = i * 4;
+      const open = 1 - covered[i]! / 255;
+      if (open <= 0) continue;
+      const lift = softened[i]! * 46 * open;
+      frame.data[o] = Math.min(255, frame.data[o]! + lift);
+      frame.data[o + 1] = Math.min(255, frame.data[o + 1]! + lift);
+      frame.data[o + 2] = Math.min(255, frame.data[o + 2]! + lift);
+    }
+    ctx.putImageData(frame, 0, 0);
+  }
+
   // Lens falloff last, over everything — it belongs to the camera, not to any
   // surface in the scene. Studio panels only; a composite already carries the
   // customer's own camera's falloff.
   if (view === 'night') {
     const frame = ctx.getImageData(0, 0, out.width, out.height);
-    frame.data.set(vignette(frame.data, out.width, out.height));
+    // Deeper and closer-in than the day default: a night frame with nothing
+    // but the sign emitting light should go dark fast away from it, the way
+    // a real photograph exposed for a lit sign crushes its surroundings
+    // rather than showing an evenly lit room.
+    frame.data.set(vignette(frame.data, out.width, out.height, 0.55, 0.3));
     ctx.putImageData(frame, 0, 0);
   }
 
@@ -661,9 +805,9 @@ function flattenOnto(
     // A halo on a wall IS the light; a second glow over it is invention.
     const glow = lightSpill(frame.data, w, h, {
       threshold: 170,
-      tight: Math.max(3, Math.round(w * 0.004)),
-      wide: Math.max(10, Math.round(w * 0.02)),
-      strength: 0.16,
+      tight: Math.max(2, Math.round(w * 0.003)),
+      wide: Math.max(6, Math.round(w * 0.012)),
+      strength: 0.12,
     });
     for (let i = 0; i < w * h; i++) {
       const o = i * 4;
@@ -678,7 +822,35 @@ function flattenOnto(
     ctx.putImageData(frame, 0, 0);
   }
 
+  // A photograph, not a screenshot. Deterministic and applied last, over the
+  // whole finished frame uniformly — the same reason `vignette` runs here and
+  // not per-material: it is what a camera and its white balance do, not a
+  // property of any one surface, so it is not something the mask needs to
+  // carve around. Most LEDs sold and shot as "white" read warm on camera, and
+  // a real exposure for a lit sign at night pulls its shadows down further
+  // than a renderer's flat black does — a small S-curve buys both without
+  // touching anything's hue identity, because it is applied identically to
+  // every pixel, logo included, and the logo's own base value already has it
+  // baked in before the protection mask is ever built.
+  if (view === 'night') {
+    const frame = ctx.getImageData(0, 0, out.width, out.height);
+    nightGrade(frame.data);
+    ctx.putImageData(frame, 0, 0);
+  }
+
   return out.toDataURL('image/png');
+}
+
+/** Warm white balance plus a gentle S-curve — a camera's look, not a light's. */
+function nightGrade(data: Uint8ClampedArray): void {
+  const warm: [number, number, number] = [1.05, 1.0, 0.92];
+  const contrast = 1.1;
+  for (let i = 0; i < data.length; i += 4) {
+    for (let c = 0; c < 3; c++) {
+      const v = data[i + c]! * warm[c]!;
+      data[i + c] = Math.max(0, Math.min(255, (v - 128) * contrast + 128));
+    }
+  }
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -778,8 +950,12 @@ async function renderSignLayer(
   renderer.setClearColor(0x000000, 0);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // The halo is clipped to the panel it lands on — see `HaloClip` in scene.ts.
+  // Without this the planes are carried on the materials and ignored, and the
+  // glow paints past the edge of the pan onto nothing.
+  renderer.localClippingEnabled = true;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = opts.view === 'night' ? 1.35 : 1.0;
+  renderer.toneMappingExposure = 1.0;
 
   const sign = buildSignScene(spec, 'composite', undefined, buildEnvironment(renderer));
   sign.setView(opts.view);

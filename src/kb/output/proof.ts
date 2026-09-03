@@ -73,6 +73,7 @@ export function assembleProof(spec: SignSpec, trace: TraceLog, opts: AssembleOpt
   }
 
   const panels = opts.panels ?? [];
+  const guidance = guidanceFor(spec);
 
   // A customer signing this has to know whether the picture in front of them
   // was touched by a generative model, and exactly how far that went. Stated
@@ -95,12 +96,13 @@ export function assembleProof(spec: SignSpec, trace: TraceLog, opts: AssembleOpt
     disclosures,
     disclosureText: renderDisclosures(disclosures),
     panels,
-    guidance: guidanceFor(spec),
+    guidance,
     problems,
     blocked: spec.blocked,
     hardStop: SCOPE_HARD_STOP,
     sheetHtml: renderProofSheet({
       spec, disclosures, panels, kbVersion: KB_VERSION, problems,
+      guidance,
     }),
   };
 }

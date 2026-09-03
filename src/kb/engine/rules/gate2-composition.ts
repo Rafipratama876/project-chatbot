@@ -15,6 +15,8 @@ import { measureStroke } from '../../geometry/metrics.js';
 import { decideConstruction, minStrokeFor } from '../../geometry/decisionTree.js';
 import { offsetToStroke, STROKE_TOLERANCE } from '../../geometry/offset.js';
 import { sizeBox, boxUndersized } from '../../geometry/boxSizing.js';
+import { isPanBacker, BACKER_PAN_MIN_DEPTH, BACKER_FLAT_THICKNESS } from '../../domain/materials.js';
+import { formatInches } from '../../domain/units.js';
 
 /** CL-R-48 — group per-item dimensions into elements (§3.2). */
 export const CL_R_48: Rule = {
@@ -324,16 +326,46 @@ export const CL_BK_01: Rule = {
     const { w, h } = ctx.spec.overall;
     // A contour backer is cut to the copy, so it needs only a reveal; a
     // straight one is a rectangle behind everything and reads better with more.
-    const margin = isContourBacker(ctx.spec.backer.shape) ? 2 : 6;
+    //
+    // Scaled to the copy, and tight. The reveal is read against the letter
+    // HEIGHT, not the width: on a wordmark 37″ × 11.5″ a 6″ margin adds a sixth
+    // to the width but half again to the height, and the panel stops being a
+    // pan behind a sign and becomes a billboard with a sign in the middle of
+    // it. The reference photographs of a straight aluminium pan show the copy
+    // very nearly filling the panel. Clamped so it never collapses to a rim —
+    // a pan still needs an edge to fold and fix through.
+    // Two margins, not one. The eye judges a pan by how much air sits above and
+    // below the copy, so the vertical reveal is the tighter of the two: equal
+    // margins on a wordmark four times wider than it is tall read as a deep
+    // band with small letters in it.
+    const cap = Math.max(...ctx.spec.elements.map((e) => e.capHeight), 0);
+    const contour = isContourBacker(ctx.spec.backer.shape);
+    const marginX = contour ? 2 : Math.min(3, Math.max(0.75, cap * 0.08));
+    const marginY = contour ? 2 : Math.min(2, Math.max(0.5, cap * 0.05));
 
-    if (ctx.spec.backer.w !== w + margin * 2) {
-      ctx.set('backer.w', w + margin * 2, {
-        message: `Backer sized to ${(w + margin * 2).toFixed(1)}″ wide — the sign plus a ${margin}″ reveal.`,
+    if (ctx.spec.backer.w !== w + marginX * 2) {
+      ctx.set('backer.w', w + marginX * 2, {
+        message: `Backer sized to ${(w + marginX * 2).toFixed(1)}″ wide — the sign plus a ${marginX.toFixed(1)}″ reveal.`,
       });
     }
-    if (ctx.spec.backer.h !== h + margin * 2) {
-      ctx.set('backer.h', h + margin * 2, {
-        message: `Backer sized to ${(h + margin * 2).toFixed(1)}″ tall.`,
+    if (ctx.spec.backer.h !== h + marginY * 2) {
+      ctx.set('backer.h', h + marginY * 2, {
+        message: `Backer sized to ${(h + marginY * 2).toFixed(1)}″ tall — a ${marginY.toFixed(1)}″ reveal above and below the copy.`,
+        severity: 'NOTE',
+      });
+    }
+
+    // §4.5 lists the pans beside the flat panels as separate products, and the
+    // returns are the difference. Left at zero the pan renders as a plate: no
+    // edge, no shadow under it, nothing the letters stand proud of — the proof
+    // then shows a flat backer where a pan was quoted.
+    if (ctx.spec.backer.depth <= 0) {
+      const isPan = isPanBacker(ctx.spec.backer.shape);
+      const depth = isPan ? BACKER_PAN_MIN_DEPTH : BACKER_FLAT_THICKNESS;
+      ctx.set('backer.depth', depth, {
+        message: isPan
+          ? `${ctx.spec.backer.shape.replace(/-/g, ' ')} formed with ${formatInches(depth)} returns.`
+          : `Backer panel ${formatInches(depth)} thick.`,
         severity: 'NOTE',
       });
     }

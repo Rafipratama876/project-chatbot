@@ -4,10 +4,11 @@ import { PNG } from 'pngjs';
 import OpenAI, { toFile } from 'openai';
 import {
   protectionMask, summarise, maskToRgba, restoreProtected, verifyProtected,
-  verifyCompositedSign, ProtectionError,
+  verifyCompositedSign, logoColourLeakFraction, ProtectionError,
 } from '#/kb/render/protect.js';
 import { contactOcclusion, lightSpill, integrate, applySpill } from '#/kb/render/integrate.js';
 import type { SignSpec } from '#/kb/domain/spec.js';
+import { TYPES } from '#/kb/domain/taxonomy.js';
 
 export interface EnhanceInput {
   /** The deterministic panel, as PNG bytes. */
@@ -18,6 +19,15 @@ export interface EnhanceInput {
    * frame is protected anyway.
    */
   renderedCoverage: Buffer | null;
+  /**
+   * Greyscale PNG of CL-P-01 alone — the copy/logo face. When present, this
+   * is used INSTEAD of `renderedCoverage` to build the mask: only the mark's
+   * own pixels are protected, and the returns, trim cap, backer and mounting
+   * surface become editable for material, lighting and environment realism.
+   * Null on a photographed panel, or wherever the renderer did not compute it
+   * — then `renderedCoverage` is the fallback, protecting the whole render.
+   */
+  logoCoverage?: Buffer | null;
   onPhotograph: boolean;
   view: 'day' | 'night';
   spec: SignSpec;
@@ -87,7 +97,28 @@ export class EnhanceService implements OnApplicationBootstrap {
     }
 
     const base = PNG.sync.read(input.base);
-    const alpha = input.renderedCoverage ? PNG.sync.read(input.renderedCoverage) : null;
+
+    // No mask, on the client's explicit, twice-confirmed instruction: the
+    // whole panel — including the logo — is handed to the model as a
+    // reference photo to reinterpret, and nothing about the result is
+    // restored or verified afterward. This trades away the one guarantee
+    // every other path in this file exists to keep. It is deliberately its
+    // own branch rather than a flag threaded through the masked path below,
+    // so that path's guarantee stays legible and this one's absence of a
+    // guarantee is never accidentally inherited by it.
+    if (!input.onPhotograph && (this.config.get<boolean>('enhance.fullAi') ?? false)) {
+      return this.enhanceFullAi(input, base);
+    }
+
+    // The tighter mask wins when it exists: it protects only the mark itself
+    // and opens everything else — returns, trim cap, backer, mounting surface
+    // — to lighting, material and environment realism. Falling back to the
+    // full coverage when it does not (an older render, or a photographed
+    // panel skipped below) keeps the whole panel protected rather than
+    // guessing at a silhouette nobody computed.
+    const logoOnly = !!input.logoCoverage;
+    const coverageSource = input.logoCoverage ?? input.renderedCoverage;
+    const alpha = coverageSource ? PNG.sync.read(coverageSource) : null;
 
     if (!input.onPhotograph && !alpha) {
       // Without the renderer's own coverage there is nothing to protect with,
@@ -104,12 +135,31 @@ export class EnhanceService implements OnApplicationBootstrap {
       for (let i = 0; i < renderedCoverage.length; i++) renderedCoverage[i] = alpha.data[i * 4]!;
     }
 
+    // A logo-only mask sits right up against pixels the model is otherwise
+    // free to reinvent, and an inpainting model asked to fill in next to a
+    // sharp letterform tends to keep drawing it — a smudged, duplicated
+    // "ghost" of the mark just outside the protected pixels. That is not a
+    // protection-mask failure (every one of THOSE pixels is still restored
+    // and verified below), but it is exactly the outcome the client asked
+    // never to see, so the buffer around the mark is much wider than the
+    // couple of antialiased pixels `enhance.margin` exists for elsewhere.
+    const margin = logoOnly
+      ? this.config.get<number>('enhance.logoMargin') ?? 40
+      : this.config.get<number>('enhance.margin') ?? 12;
+
     const mask = protectionMask({
       width: base.width,
       height: base.height,
       renderedCoverage,
       onPhotograph: input.onPhotograph,
-      margin: this.config.get<number>('enhance.margin') ?? 12,
+      margin,
+      // Only meaningful for the logo-only pass, where the coverage includes
+      // the halo's own soft fade. See `ProtectionInput.minAlpha` — a `> 0`
+      // test there was locking the halo's entire, mostly-transparent reach
+      // as one hard opaque block. 96 keeps the halo's visibly bright core
+      // (and the face, always fully opaque) locked, and opens its fading
+      // tail back up to the same relighting as everything else.
+      minAlpha: logoOnly ? 96 : 1,
     });
     const area = summarise(mask);
 
@@ -130,38 +180,68 @@ export class EnhanceService implements OnApplicationBootstrap {
     }
 
     try {
-      const returned = await this.callModel(input, base, mask);
-      const restored = restoreProtected(base, returned, mask);
+      const returnedCandidates = await this.callModel(input, base, mask, logoOnly);
 
-      const check = verifyProtected(
-        base,
-        { width: base.width, height: base.height, data: restored.data },
-        mask,
-      );
-      if (!check.ok) {
-        // Ours to fix, not the model's. Ship the deterministic render.
-        this.logger.error(`enhancement discarded: ${check.reason}`);
+      // No colour lock, no distance fade, on the client's explicit
+      // instruction after those made the material and the ambient light
+      // look constrained rather than photographic. What replaces them is not
+      // a constraint on any one image but a choice between several: each
+      // candidate is restored and verified independently — the mask is
+      // exact, never negotiable, checked pixel for pixel every time — and
+      // then scored for how much of the logo's own colour leaked into the
+      // pixels it does not own. See `logoColourLeakFraction` — a ghosted
+      // duplicate of the mark is the one recurring failure a wide-open
+      // editable region actually produced, and it is exactly the mark's own
+      // palette turning up somewhere it should not be.
+      let best: { data: Uint8Array; changed: number; violations: number; worstViolation: number; leak: number } | null = null;
+      let lastFailure: string | null = null;
+
+      for (const candidate of returnedCandidates) {
+        const restored = restoreProtected(base, candidate, mask);
+        const final = restored.data;
+        const check = verifyProtected(base, { width: base.width, height: base.height, data: final }, mask);
+        if (!check.ok) {
+          lastFailure = check.reason ?? 'protected pixels changed';
+          continue;
+        }
+        const leak = logoColourLeakFraction(base, final, mask);
+        if (!best || leak < best.leak) {
+          best = { data: final, changed: restored.changed, violations: restored.violations, worstViolation: restored.worstViolation, leak };
+        }
+      }
+
+      if (!best) {
+        this.logger.error(`enhancement discarded: ${lastFailure ?? 'no candidate verified'}`);
         return {
           png: input.base,
           applied: false,
-          reason: `enhancement discarded — ${check.reason}`,
+          reason: `enhancement discarded — ${lastFailure ?? 'no candidate verified'}`,
         };
       }
 
+      const restored = best;
+      const final = best.data;
+
       const out = new PNG({ width: base.width, height: base.height });
-      out.data = Buffer.from(restored.data);
+      out.data = Buffer.from(final);
 
       this.logger.log(
-        `${input.view}: enhanced ${(area.editableFraction * 100).toFixed(0)}% of the panel; `
+        `${input.view}: enhanced ${(area.editableFraction * 100).toFixed(0)}% of the panel `
+        + `(best of ${returnedCandidates.length}, leak ${(best.leak * 100).toFixed(1)}%); `
         + `${restored.changed} px changed, ${restored.violations} px restored`,
       );
 
       return {
         png: PNG.sync.write(out),
         applied: restored.changed > 0,
-        reason: 'The empty frame around the sign was rendered by a generative model. '
-          + 'The sign, the mounting surface and every dimension are the '
-          + 'deterministic render, restored pixel for pixel and verified.',
+        reason: logoOnly
+          ? 'Everything except the logo — material, colour, lighting, reflection, the wall '
+            + 'and its surroundings — was freely reinterpreted by a generative model for '
+            + 'realism. The logo itself — its outline, size, position and colour — is the '
+            + 'deterministic render, restored pixel for pixel and verified.'
+          : 'The empty frame around the sign was rendered by a generative model. '
+            + 'The sign, the mounting surface and every dimension are the '
+            + 'deterministic render, restored pixel for pixel and verified.',
         stats: {
           editableFraction: area.editableFraction,
           changedPixels: restored.changed,
@@ -341,33 +421,56 @@ export class EnhanceService implements OnApplicationBootstrap {
     ].join(' ');
   }
 
+  /**
+   * One call, several tries. The model's own randomness is what makes any
+   * single attempt occasionally ghost a duplicate of the mark into the
+   * glow — not a mask or prompt bug, a sampling draw — and the fix for a
+   * sampling draw is another draw, not another sentence. `n` candidates come
+   * back from one request; `enhance()` restores and verifies each and keeps
+   * the one with the least of the logo's own colour leaking outside the
+   * pixels it is allowed to be in.
+   */
   private async callModel(
     input: EnhanceInput,
     base: PNG,
     mask: Uint8Array,
-  ): Promise<{ width: number; height: number; data: Uint8Array }> {
+    logoOnly: boolean,
+  ): Promise<Array<{ width: number; height: number; data: Uint8Array }>> {
     const client = this.getClient();
 
     const maskPng = new PNG({ width: base.width, height: base.height });
     maskPng.data = Buffer.from(maskToRgba(mask, base.width, base.height));
+
+    // The edit endpoint only accepts a fixed set of output sizes — a proof
+    // panel's own dimensions (e.g. 1600×1000) are not among them. Requesting
+    // one and resampling the result back to the panel's size afterwards is
+    // safe: the protected pixels are never taken from this image, only the
+    // editable ones, and a slightly stretched background is a cosmetic cost,
+    // not a correctness one. Compare `resample`, used the same way for the
+    // concept scene's generated setting.
+    const outSize = pickEditSize(base.width, base.height);
+    const candidates = logoOnly ? this.config.get<number>('enhance.candidates') ?? 2 : 1;
 
     const result = await client.images.edit(
       {
         model: this.config.get<string>('enhance.model') ?? 'gpt-image-1',
         image: await toFile(input.base, 'panel.png', { type: 'image/png' }),
         mask: await toFile(PNG.sync.write(maskPng), 'mask.png', { type: 'image/png' }),
-        prompt: this.prompt(input),
-        size: `${base.width}x${base.height}` as never,
-        n: 1,
+        prompt: logoOnly ? this.realismPrompt(input) : this.prompt(input),
+        size: outSize as never,
+        n: candidates,
       },
       { timeout: this.config.get<number>('enhance.timeoutMs') ?? 90_000 },
     );
 
-    const b64 = result.data?.[0]?.b64_json;
-    if (!b64) throw new Error('the image endpoint returned no image');
-
-    const returned = PNG.sync.read(Buffer.from(b64, 'base64'));
-    return { width: returned.width, height: returned.height, data: returned.data };
+    const out = (result.data ?? []).map((d) => {
+      if (!d.b64_json) throw new Error('the image endpoint returned no image');
+      const raw = PNG.sync.read(Buffer.from(d.b64_json, 'base64'));
+      const returned = resample(raw, base.width, base.height);
+      return { width: returned.width, height: returned.height, data: returned.data };
+    });
+    if (out.length === 0) throw new Error('the image endpoint returned no image');
+    return out;
   }
 
   /**
@@ -392,6 +495,196 @@ export class EnhanceService implements OnApplicationBootstrap {
     ].join(' ');
   }
 
+  /**
+   * What the model is asked for when only CL-P-01 — the logo face — is
+   * masked off.
+   *
+   * A plain-English framing plus a JSON constraint block naming the same
+   * thing twice, in two forms a model parses differently. The block is not
+   * enforcement — nothing here is; the mask and the restoration are what
+   * actually guarantee the logo — but a diffusion model asked to "keep the
+   * returns realistic" tends to also drift their colour, and naming the exact
+   * value it arrived with (`returnColour: "Black"`, not "as rendered") is
+   * cheap insurance against that drift, the way a spec line is cheaper than a
+   * hope.
+   */
+
+  /**
+   * Where the light is, when there is a panel behind the copy.
+   *
+   * A rear-illuminated element on a backer throws its light onto THAT backer:
+   * a bright rim on the panel, tight around each letterform and falling away
+   * from it. The panel itself is not a lamp and its outer edge does not glow.
+   * Left unsaid, the model reads a dark plaque with bright copy on it as a
+   * lightbox and lights the wall around the whole panel instead — which is a
+   * different product, and one the spec block does not describe.
+   */
+  private haloPlacementNote(input: EnhanceInput): string | null {
+    if (input.view !== 'night') return null;
+    const rearLit = TYPES[input.spec.type].rearIlluminated;
+    const hasBacker = input.spec.backer.present;
+    if (!hasBacker) return null;
+
+    return rearLit
+      ? 'The light this sign throws sits BETWEEN the copy and the backer panel behind it. Show it '
+        + 'as a halo on the face of that panel: brightest tight against each letterform, falling '
+        + 'away within a few inches of it, and blocked by the letters themselves so each one reads '
+        + 'as standing off the panel. The panel is not a lightbox and does not emit: it does not '
+        + 'glow along its own outer edge, and the wall outside the panel stays dark except for what '
+        + 'little spills past. A ring of light around the outside of the panel is wrong.'
+      : 'The copy is lit through its own face; the backer panel behind it is not a lightbox and does '
+        + 'not emit. Do not draw a glow around the outside of the panel — the panel takes only the '
+        + 'light the letters spill onto it, and the wall outside it stays dark.';
+  }
+
+  private realismPrompt(input: EnhanceInput): string {
+    const night = input.view === 'night';
+    const hasBacker = input.spec.backer.present;
+
+    return [
+      'This is a product render of an illuminated channel-letter sign, and the goal is a',
+      'genuinely photorealistic result — the quality of a real professional product photograph,',
+      'not a CG-looking touch-up. You have full creative freedom over everything in the image',
+      `except the logo lettering itself: reinterpret the returns, trim cap,${hasBacker ? ' backer panel,' : ''}`,
+      'mounting surface, mounting hardware, wall material and texture, ambient light, reflections,',
+      'shadows and atmosphere however makes it look most real. Real screws or standoffs, real',
+      'brushed or painted metal with proper specular highlights, a real wall material with grain',
+      'and imperfection, real bounce light and colour temperature are all encouraged.',
+      night
+        ? 'It is night: the sign is lit from within and casts a soft, warm, believable glow onto '
+          + 'the wall behind it — the kind of glow a real LED-lit sign throws in a long-exposure '
+          + 'photograph, not a flat CG bloom. Let the rest of the scene go genuinely dark around it.'
+        : 'It is daytime: natural, soft ambient light, believable contact shadows and occlusion '
+          + 'under the returns and trim cap.',
+      this.haloPlacementNote(input),
+      hasBacker
+        ? 'The backer panel behind the letters is a real, physical plaque — render it as one: visible '
+          + 'material (brushed metal, painted aluminium composite, whatever reads best), catching some of '
+          + 'the sign\'s own glow and a little ambient bounce across its surface, with real screws or '
+          + 'standoffs where it mounts to the wall. It should read as an object you could reach out and '
+          + 'touch, not a flat black silhouette or a cut-out shadow shape sitting in front of the glow.'
+        : 'There is no backer panel or plaque of any kind in this design — do not add one. The letters '
+          + 'mount directly to the wall on their own standoffs or spacers, with the wall material and '
+          + 'texture visible in the gaps between and around them, exactly like a real direct-mounted '
+          + 'channel-letter installation. Do not invent a plate, panel, plaque, frame or border behind '
+          + 'or around the letters — the wall itself is the only backdrop.',
+      'The one hard rule: the logo lettering in the centre of the frame — its shape, proportions',
+      'and colours — must not be redrawn, duplicated, echoed or altered in any way. It is masked',
+      'and will be restored exactly regardless of what you produce there, so treat it as already',
+      'finished and design everything else around it. The glow the sign casts is diffuse light with',
+      'no shape of its own — it must never contain a second, faint or partial copy of the letters,',
+      'a ghost outline, or anything that reads as a duplicate sign next to the real one.',
+    ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * The unmasked pass. The panel goes to the model as a reference photo and
+   * comes back as whatever the model made of it — logo included. Nothing
+   * here is restored, nothing is verified, and `EnhanceOutcome.stats` is
+   * left unset because there is nothing left that was actually checked.
+   * `applied` is true whenever a usable image came back, not because the
+   * result was confirmed correct in any sense the rest of this file means
+   * by that word.
+   */
+  private async enhanceFullAi(input: EnhanceInput, base: PNG): Promise<EnhanceOutcome> {
+    try {
+      const client = this.getClient();
+      const outSize = pickEditSize(base.width, base.height);
+
+      const result = await client.images.edit(
+        {
+          model: this.config.get<string>('enhance.model') ?? 'gpt-image-1',
+          image: await toFile(input.base, 'panel.png', { type: 'image/png' }),
+          // No `mask` — the whole panel is editable, the logo included.
+          prompt: this.fullAiPrompt(input),
+          size: outSize as never,
+          n: 1,
+        },
+        { timeout: this.config.get<number>('enhance.timeoutMs') ?? 90_000 },
+      );
+
+      const b64 = result.data?.[0]?.b64_json;
+      if (!b64) throw new Error('the image endpoint returned no image');
+      const raw = PNG.sync.read(Buffer.from(b64, 'base64'));
+      const resized = resample(raw, base.width, base.height);
+
+      const out = new PNG({ width: base.width, height: base.height });
+      out.data = Buffer.from(resized.data);
+
+      this.logger.warn(
+        `${input.view}: full-AI pass returned an image — UNVERIFIED, logo not restored`,
+      );
+
+      return {
+        png: PNG.sync.write(out),
+        applied: true,
+        reason: 'The entire image, including the logo, was regenerated by a generative '
+          + 'model from a reference photo of the deterministic render. Nothing in this '
+          + 'image is verified against the specification — dimensions, colours, outline '
+          + 'and position may all differ from what was designed. Illustrative only.',
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`full-AI pass skipped: ${message}`);
+      return {
+        png: input.base,
+        applied: false,
+        reason: 'the full-AI pass was unavailable; the deterministic render is shown',
+      };
+    }
+  }
+
+  /**
+   * What the model is told when it owns the whole frame, logo included.
+   * Precise about what the mark actually says and is coloured, since there
+   * is no mask to fall back on if the prompt is vague — this is the only
+   * lever left.
+   */
+  private fullAiPrompt(input: EnhanceInput): string {
+    const night = input.view === 'night';
+
+    // Only typeset copy gets quoted to the model. A logo mark — uploaded
+    // artwork rather than typed text — has no reliable text to quote: its
+    // `content` is whatever the grouping step could infer, which for an
+    // imported mark is a placeholder, and the design's `businessName` falls
+    // back to the record's name, which is "Untitled Sign" until someone
+    // renames it. Sent as "the sign reads: …", the model did exactly as it
+    // was told and lettered the words "Untitled Sign" across the wall. The
+    // reference photo already shows the mark; for artwork, saying nothing
+    // about its content is strictly better than saying something wrong.
+    const wordmarks = input.spec.elements.filter((e) => e.role !== 'CL-E-04');
+    const quoted = wordmarks
+      .map((e) => {
+        const colours = e.colourBreaks?.length ? e.colourBreaks.join(', ') : null;
+        return colours ? `"${e.content}" in exactly these colours: ${colours}` : `"${e.content}"`;
+      })
+      .join('; ');
+    const palette = [...new Set(input.spec.elements.flatMap((e) => e.colourBreaks ?? []))];
+
+    return [
+      'This is a reference photo of an illuminated channel-letter sign, and the goal is a',
+      'genuinely photorealistic reinterpretation of it — the quality of a real professional',
+      'product photograph. You may reinterpret everything: the wall material and texture,',
+      'the returns, trim cap, backer panel if any, mounting hardware, ambient light,',
+      'reflections, shadows and atmosphere.',
+      quoted
+        ? `The sign reads: ${quoted}. Reproduce this text and these exact colours precisely, in `
+          + 'the same layout, proportions and position as the reference photo.'
+        : 'The sign face carries an existing logo mark, shown in the reference photo. Reproduce '
+          + 'that mark exactly as it appears there — same shapes, same proportions, same position, '
+          + `same colours${palette.length ? ` (${palette.join(', ')})` : ''}. Do not letter any `
+          + 'words, do not add any text, and do not substitute a different logo: whatever the '
+          + 'reference photo shows on the sign face is the mark, and it is already correct.',
+      'This is the one part of the image that must not drift, be redrawn into a different font or',
+      'shape, be duplicated, or shift in colour, even while everything around it is reinterpreted.',
+      night
+        ? 'It is night: the sign is lit from within and casts a soft, warm, believable glow onto '
+          + 'the wall behind it, and the rest of the scene is genuinely dark around it.'
+        : 'It is daytime: natural, soft ambient light and believable contact shadows.',
+      this.haloPlacementNote(input),
+    ].filter(Boolean).join('\n');
+  }
+
   private getClient(): OpenAI {
     if (this.client) return this.client;
     this.client = new OpenAI({ apiKey: this.config.getOrThrow<string>('enhance.apiKey') });
@@ -400,11 +693,24 @@ export class EnhanceService implements OnApplicationBootstrap {
 }
 
 /**
- * Nearest-neighbour resample of a generated backdrop.
+ * The nearest of the edit endpoint's fixed output sizes to a panel's own
+ * aspect ratio. There is no "auto to this exact size" option — 1024×1024,
+ * 1024×1536 and 1536×1024 are the whole menu.
+ */
+function pickEditSize(width: number, height: number): '1024x1024' | '1024x1536' | '1536x1024' {
+  const ratio = width / height;
+  if (ratio > 1.2) return '1536x1024';
+  if (ratio < 1 / 1.2) return '1024x1536';
+  return '1024x1024';
+}
+
+/**
+ * Nearest-neighbour resample of a model's output back to a panel's own size.
  *
- * Only ever applied to the generated setting, never to the sign: moving the
- * sign by a fraction of a pixel is exactly the class of error the verification
- * exists to catch, so the sign is rendered at the final size instead.
+ * Safe here because it is only ever applied before the protected pixels are
+ * overwritten from the deterministic base — moving THOSE by a fraction of a
+ * pixel is exactly the class of error the verification exists to catch, and
+ * this function never gets to decide what they end up being.
  */
 function resample(source: PNG, width: number, height: number): PNG {
   if (source.width === width && source.height === height) return source;

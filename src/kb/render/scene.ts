@@ -10,7 +10,7 @@
  */
 import * as THREE from 'three';
 import type { SignSpec, SignElement, Contour } from '../domain/spec.js';
-import { isBoxConstruction, returnColourOf, faceColourOf } from '../domain/spec.js';
+import { isBoxConstruction, returnColourOf, faceColourOf, faceRenderColour } from '../domain/spec.js';
 import { TYPES, isContourBacker } from '../domain/taxonomy.js';
 import { buildRenderContract, type RenderContract, type ElementTruth } from './contract.js';
 import { extrude, flat, boxShape, contoursToShapes } from './shapes.js';
@@ -77,6 +77,20 @@ const SURFACE_EPS = 0.02;
  * sign it is also the surface the light lands on — too tight and the glow has
  * nowhere to fall.
  */
+/**
+ * Whether a mesh is ground for the halo rather than sign.
+ *
+ * The wash lands on whatever is behind the copy — the wall, or the backer when
+ * there is one — and is blocked by the copy standing in front of it. Anything
+ * this returns true for is left out of the coverage mask the compositor uses,
+ * so the glow is allowed to fall there.
+ */
+export const isHaloGround = (name: string): boolean =>
+  /halo/i.test(name) || /mounting surface/i.test(name) || /backer panel/i.test(name);
+
+/** The rectangle the halo is allowed to paint on, in world inches. */
+export interface HaloClip { x0: number; x1: number; y0: number; y1: number }
+
 const backerReveal = (spec: SignSpec): number =>
   Math.max(2, Math.max(...spec.elements.map((e) => e.capHeight), 0) * 0.16);
 
@@ -119,6 +133,8 @@ export function buildSignScene(
 
   // ── CL-P-20 backer panel ────────────────────────────────────────────────
   let mountPlaneZ = WALL_Z;
+  /** Where the surface the halo lands on ends. Null = it runs to the wall. */
+  let haloClip: HaloClip | null = null;
   if (spec.backer.present) {
     const thickness = Math.max(spec.backer.depth, 0.25);
     const contour = isContourBacker(spec.backer.shape);
@@ -148,6 +164,21 @@ export function buildSignScene(
     scene.add(backer);
     disposables.push(geo, mat);
     mountPlaneZ = WALL_Z + thickness;
+
+    // A rectangular pan is a real edge, and light stops at it. The halo is
+    // drawn on the plane of the pan's face, so without this the shells that
+    // reach past the pan keep painting in mid-air over the wall — which is
+    // what put a bright ring around the panel and left the copy sitting on an
+    // unlit black field. A contour backer is already cut to the copy, so its
+    // own offset does this job and it is left alone.
+    if (!contour) {
+      haloClip = {
+        x0: spec.overall.w / 2 - spec.backer.w / 2,
+        x1: spec.overall.w / 2 + spec.backer.w / 2,
+        y0: spec.overall.h / 2 - spec.backer.h / 2,
+        y1: spec.overall.h / 2 + spec.backer.h / 2,
+      };
+    }
   }
 
   // ── CL-P-18 raceway / CL-P-19 wireway / CL-P-27 bottom rail ─────────────
@@ -182,8 +213,8 @@ export function buildSignScene(
     const haloSurface = spec.backer.present ? spec.backer.colour : spec.mountingSurface.colour;
 
     const group = isBoxConstruction(el.construction)
-      ? buildBox(el, truth, spec, mountPlaneZ, haloSurface, viewDependent, disposables)
-      : buildLetters(el, truth, spec, mountPlaneZ, haloSurface, viewDependent, disposables);
+      ? buildBox(el, truth, spec, mountPlaneZ, haloSurface, haloClip, viewDependent, disposables)
+      : buildLetters(el, truth, spec, mountPlaneZ, haloSurface, haloClip, viewDependent, disposables);
     group.name = `${el.id} · ${el.role} · ${el.construction}`;
     signGroup.add(group);
   }
@@ -229,6 +260,7 @@ function buildLetters(
   spec: SignSpec,
   mountPlaneZ: number,
   haloSurface: string,
+  haloClip: HaloClip | null,
   viewDependent: Array<(view: View) => void>,
   disposables: Array<{ dispose(): void }>,
 ): THREE.Group {
@@ -269,7 +301,9 @@ function buildLetters(
   // The face, as a separate surface so it can emit while the return does not.
   const faceGeo = flat(el.contours);
   const faceMat = faceMaterial({
-    colour: el.face.renderColour ?? faceColourOf(el),
+    // A day/night face is dark by day and its stated colour once lit, so the
+    // colour is asked for per view rather than fixed at build time.
+    colour: faceRenderColour(el, 'day'),
     truth: truth.day,
     view: 'day',
     translucent: type.translucentFace && !isFlatCut,
@@ -282,7 +316,7 @@ function buildLetters(
 
   viewDependent.push((view) => {
     const t = view === 'day' ? truth.day : truth.night;
-    setFaceLit(faceMat, el.face.renderColour ?? faceColourOf(el), t.faceEmissive && view === 'night');
+    setFaceLit(faceMat, faceRenderColour(el, view), t.faceEmissive && view === 'night');
     canMat.emissiveIntensity = t.returnsEmissive && view === 'night' ? 1.4 : 0;
     canMat.needsUpdate = true;
   });
@@ -317,7 +351,7 @@ function buildLetters(
     // is drawn and the hardware is not. A photograph of a real installation
     // shows the standoff posts; a pre-sales render that drew them would be
     // showing fabrication hardware §9.2 keeps off a customer-facing view.
-    g.add(buildHalo(el.contours, standoff, el.ledColour, haloSurface, mountPlaneZ, viewDependent, disposables));
+    g.add(buildHalo(el.contours, standoff, el.ledColour, haloSurface, mountPlaneZ, haloClip, viewDependent, disposables));
   }
 
   return g;
@@ -343,6 +377,8 @@ function buildHalo(
   /** What the light lands on — the backer if there is one, otherwise the wall. */
   surfaceColour: string,
   wallZ: number,
+  /** The edge of that surface, when it has one. */
+  clip: HaloClip | null,
   viewDependent: Array<(view: View) => void>,
   disposables: Array<{ dispose(): void }>,
 ): THREE.Group {
@@ -351,16 +387,27 @@ function buildHalo(
 
   // Spread scales with the gap: a 1.5″ standoff throws a tighter halo than a
   // 2″ one, which is the difference §6.5 CL-R-37 is drawing.
-  // Light leaves the back of the can and spreads as it crosses the gap, so the
-  // wash is roughly as wide as the standoff and fades over about three times
-  // it. A 1.5″ gap throws a tighter, brighter halo than a 2″ one — which is
-  // the difference §6.5 CL-R-37 is drawing when it fixes the range.
-  const reach = Math.max(standoff, 1.5) * 3.2;
+  // Light leaves the back of the can and spreads as it crosses the gap. Was
+  // 3.2× the gap — measured against real output that left a visibly dark,
+  // unlit band immediately around the letters before the bright ring began,
+  // reading as a dark plaque sitting behind the sign rather than as the
+  // sign's own glow. 1.8× keeps the same falloff shape but starts it closer
+  // in, so the light reaches the letters' own edge instead of leaving a gap.
+  const reach = Math.max(standoff, 1.5) * 1.8;
 
   // Enough shells that the steps fall below what the eye separates. Six read
   // as concentric rings — a halo drawn as contour lines, not as light. More
   // than that also softens the polygonal facets an offset leaves behind.
   const shells = 28;
+  // Four planes, each keeping what is on the inside of one pan edge. Cheaper
+  // and exact where clipping the shell outlines geometrically would mean a
+  // boolean per shell, twenty-eight times per element.
+  const clipPlanes = clip ? [
+    new THREE.Plane(new THREE.Vector3(1, 0, 0), -clip.x0),
+    new THREE.Plane(new THREE.Vector3(-1, 0, 0), clip.x1),
+    new THREE.Plane(new THREE.Vector3(0, 1, 0), -clip.y0),
+    new THREE.Plane(new THREE.Vector3(0, -1, 0), clip.y1),
+  ] : [];
   // The halo is the LED reflected off the surface behind, not the LED itself.
   const colour = resolveColour(ledColour ?? 'bright white', '#fbfbf7')
     .multiply(resolveColour(surfaceColour, '#ffffff'));
@@ -379,6 +426,7 @@ function buildHalo(
     // quarter-inch chord on a five-inch arc reads as a facet.
     const geo = flat(offsetContours(contours, distance, true, 0.012));
     const mat = haloMaterial(ledColour, 'day', surfaceColour);
+    if (clip) mat.clippingPlanes = clipPlanes;
 
     const mesh = new THREE.Mesh(geo, mat);
     // Named individually, not just on the group: the §9.2 checks walk meshes,
@@ -453,6 +501,7 @@ function buildBox(
   spec: SignSpec,
   mountPlaneZ: number,
   haloSurface: string,
+  haloClip: HaloClip | null,
   viewDependent: Array<(view: View) => void>,
   disposables: Array<{ dispose(): void }>,
 ): THREE.Group {
@@ -525,7 +574,7 @@ function buildBox(
   // §9.2: the surface BEHIND a rear-illuminated element glows. On a logo box
   // that surface is the wall, exactly as it is for a letter.
   if (truth.night.backgroundEmissive) {
-    g.add(buildHalo(el.contours, standoff, el.ledColour, haloSurface, mountPlaneZ, viewDependent, disposables));
+    g.add(buildHalo(el.contours, standoff, el.ledColour, haloSurface, mountPlaneZ, haloClip, viewDependent, disposables));
   }
 
   if (isContourCut) {

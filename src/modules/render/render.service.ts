@@ -110,10 +110,14 @@ export class RenderService implements OnModuleDestroy {
 
         if (this.enhance.enabled) {
           const coverageUrl = p.protection?.coverageUrl ?? null;
+          const logoCoverageUrl = p.protection?.logoCoverageUrl ?? null;
           const outcome = await this.enhance.enhance({
             base,
             renderedCoverage: coverageUrl
               ? Buffer.from(coverageUrl.split(',')[1]!, 'base64')
+              : null,
+            logoCoverage: logoCoverageUrl
+              ? Buffer.from(logoCoverageUrl.split(',')[1]!, 'base64')
               : null,
             onPhotograph: p.protection?.onPhotograph ?? false,
             view: p.view,

@@ -12,8 +12,11 @@ import { makeCamera, panelsFor } from '#/kb/render/views.js';
 import { contoursToShapes, extrude } from '#/kb/render/shapes.js';
 import { ringAround } from '#/kb/geometry/offset.js';
 import { heavenCrepes, haloFlush, nonLitTagline } from './fixtures/jobs.js';
-import { logoMark } from './fixtures/blockGlyphs.js';
+import { logoMark, blockWord } from './fixtures/blockGlyphs.js';
 import { buildRenderContract } from '#/kb/render/contract.js';
+import { BACKER_PAN_MIN_DEPTH } from '#/kb/domain/materials.js';
+import { litEmissiveIntensity, resolveColour } from '#/kb/render/materials.js';
+import { isHaloGround } from '#/kb/render/scene.js';
 import { ENVIRONMENT_INTENSITY } from '#/kb/render/environment.js';
 import type { JobInput } from '#/kb/domain/spec.js';
 
@@ -543,5 +546,167 @@ describe('surface realism', () => {
     const returns = materialsOf(scene.scene, /^CL-P-02 return$/) as THREE.MeshStandardMaterial[];
     expect(returns.length).toBeGreaterThan(0);
     for (const r of returns) expect(r.metalness).toBeGreaterThan(0.4);
+  });
+});
+
+describe('§4.5 backer panel — a pan is not a plate', () => {
+  const panJob = (): JobInput => ({
+    jobId: 'pan-backer',
+    form: {
+      businessName: 'Orupa',
+      channelLetterType: 'Front Lit',
+      installationMethod: 'Flush Mounted',
+      backerPanelOption: 'Straight Aluminum Pan',
+      backerPanelColour: 'Black',
+    },
+    artwork: blockWord('ORUPA', { capHeight: 12, stroke: 2 }),
+  });
+
+  it('gives a pan real returns, so it has an edge to read', async () => {
+    const { spec } = await runEngine(panJob());
+    expect(spec.backer.shape).toBe('straight-aluminium-pan');
+    expect(spec.backer.depth).toBe(BACKER_PAN_MIN_DEPTH);
+
+    // And the depth reaches the geometry: the letters stand off the pan face,
+    // not off the wall.
+    const sign = buildSignScene(spec, 'studio');
+    let backer: THREE.Mesh | undefined;
+    sign.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh && o.name === 'CL-P-20 backer panel') backer = m;
+    });
+    expect(backer).toBeDefined();
+    backer!.geometry.computeBoundingBox();
+    const box = backer!.geometry.boundingBox!;
+    expect(box.max.z - box.min.z).toBeCloseTo(spec.backer.depth, 5);
+    sign.dispose();
+  });
+
+  /** Halo needs a rear-illuminated type; the pan job above is front lit. */
+  const haloPanJob = (): JobInput => ({
+    ...panJob(),
+    form: { ...panJob().form, channelLetterType: 'Front and Back Lit' },
+  });
+
+  it('the halo stops at the edge of the pan', async () => {
+    // The halo is painted on the plane of the pan's face. Unclipped, the shells
+    // that reach past the pan keep painting over the wall an inch behind them —
+    // which drew a bright ring around the panel and left the copy sitting on an
+    // unlit black field, reading as swallowed by its own backer.
+    const { spec } = await runEngine(haloPanJob());
+    const sign = buildSignScene(spec, 'studio');
+    let planes: readonly THREE.Plane[] = [];
+    sign.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh && o.name.startsWith('halo shell 1 ')) {
+        planes = (m.material as THREE.Material).clippingPlanes ?? [];
+      }
+    });
+
+    expect(planes).toHaveLength(4);
+    const x0 = spec.overall.w / 2 - spec.backer.w / 2;
+    const x1 = spec.overall.w / 2 + spec.backer.w / 2;
+    expect(planes.find((p) => p.normal.x === 1)!.constant).toBeCloseTo(-x0, 5);
+    expect(planes.find((p) => p.normal.x === -1)!.constant).toBeCloseTo(x1, 5);
+    sign.dispose();
+  });
+
+  it('with no backer the halo runs onto the wall, unclipped', async () => {
+    const { spec } = await runEngine({
+      ...haloPanJob(),
+      form: { ...haloPanJob().form, backerPanelOption: 'No Backer' },
+    });
+    expect(spec.backer.present).toBe(false);
+
+    const sign = buildSignScene(spec, 'studio');
+    let seen = false;
+    sign.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh && o.name.startsWith('halo shell 1 ')) {
+        seen = true;
+        expect((m.material as THREE.Material).clippingPlanes ?? []).toHaveLength(0);
+      }
+    });
+    expect(seen, 'a halo-lit sign should have halo shells').toBe(true);
+    sign.dispose();
+  });
+
+  it('a flat panel stays a sheet', async () => {
+    const { spec } = await runEngine({
+      ...panJob(),
+      form: { ...panJob().form, backerPanelOption: 'Straight Flat' },
+    });
+    expect(spec.backer.shape).toBe('straight-flat');
+    expect(spec.backer.depth).toBeLessThan(BACKER_PAN_MIN_DEPTH);
+  });
+
+  it('the reveal is scaled to the copy, and tight', async () => {
+    // A 12″ cap gets a 1.44″ reveal. The old flat 6″ made the panel half again
+    // as tall as the copy, which reads as a billboard rather than a pan.
+    const { spec } = await runEngine(panJob());
+    expect(spec.backer.w).toBeCloseTo(spec.overall.w + 12 * 0.08 * 2, 5);
+    // Tighter above and below than at the ends — that is what makes the copy
+    // read as standing on a pan rather than floating in a band.
+    expect(spec.backer.h).toBeCloseTo(spec.overall.h + 12 * 0.05 * 2, 5);
+    expect(spec.overall.h / spec.backer.h).toBeGreaterThan(0.88);
+    expect(spec.overall.w / spec.backer.w).toBeGreaterThan(0.94);
+  });
+});
+
+describe('§9.2 a lit face has to read as lit', () => {
+  it('scales a dark face until its brightest channel is full, and no further', async () => {
+    // FedEx purple tops out at 0.55 of a channel and rendered as a dark shape
+    // on a dark wall — the "F" vanished while the orange "Ex" beside it read
+    // perfectly. Both were specified; the difference was only the pigment.
+    const purple = resolveColour('#4d148c');
+    const orange = resolveColour('#ff6600');
+
+    const gain = litEmissiveIntensity(purple);
+    expect(gain).toBeGreaterThan(1.5);
+    // Orange already has a channel at full: nothing to gain, and gaining would
+    // only clip it.
+    expect(litEmissiveIntensity(orange)).toBeCloseTo(1, 5);
+
+    // Hue is exactly the specified one — every channel scaled by one factor,
+    // and the brightest lands at full rather than past it.
+    const peak = Math.max(purple.r, purple.g, purple.b);
+    expect(peak * gain).toBeLessThanOrEqual(1 + 1e-9);
+    expect((purple.b * gain) / (purple.r * gain)).toBeCloseTo(purple.b / purple.r, 5);
+  });
+});
+
+describe('§9.2 where the halo lands when there is a backer', () => {
+  it('treats the backer as ground, so the wash falls on it and not around it', async () => {
+    // The compositor paints the blurred halo everywhere the sign does NOT
+    // cover. Counting the pan as sign suppressed the wash exactly where it
+    // belongs — on the pan, around the copy — and left it only on the wall
+    // outside the panel, so the glow read as coming from behind the panel.
+    const { spec } = await runEngine({
+      jobId: 'halo-on-pan',
+      form: {
+        businessName: 'Orupa',
+        channelLetterType: 'Front and Back Lit',
+        installationMethod: 'Flush Mounted',
+        backerPanelOption: 'Straight Aluminum Pan',
+        backerPanelColour: 'Black',
+      },
+      artwork: [logoMark({ x: 0, y: 0, size: 18 })],
+    });
+    const sign = buildSignScene(spec, 'studio');
+
+    const ground: string[] = [];
+    const covering: string[] = [];
+    sign.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (!m.isMesh) return;
+      (isHaloGround(o.name) ? ground : covering).push(o.name);
+    });
+
+    expect(ground).toContain('CL-P-20 backer panel');
+    expect(ground).toContain('CL-P-31 mounting surface');
+    // The copy still blocks its own light — that is what makes a halo read.
+    expect(covering).toContain('CL-P-32 logo box');
+    expect(covering.some((n) => /halo/i.test(n))).toBe(false);
+    sign.dispose();
   });
 });

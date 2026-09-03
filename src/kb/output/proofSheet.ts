@@ -7,7 +7,7 @@
  * here computes anything about the sign.
  */
 import type { SignSpec } from '../domain/spec.js';
-import { sqFt, depthOf, returnColourOf, faceColourOf, isBoxConstruction } from '../domain/spec.js';
+import { sqFt, depthOf, returnColourOf, faceColourOf, isBoxConstruction, isDayNightFace } from '../domain/spec.js';
 import { TYPES, MOUNTS, ROLES, CONSTRUCTION_FACTS, COPY_TREATMENT_FACTS } from '../domain/taxonomy.js';
 import { STANDING_NOTES } from '../domain/boilerplate.js';
 import { formatInches } from '../domain/units.js';
@@ -31,6 +31,13 @@ export interface ProofSheetInput {
   disclosures: DisclosureBundle;
   panels: SheetPanel[];
   kbVersion: string;
+  /**
+   * §9.5 design guidance — the Layer 10 reading distances. Soft, advisory and
+   * printed under its own heading so a customer can see at what distance the
+   * copy they chose actually reads, which is the question the visibility chart
+   * exists to answer.
+   */
+  guidance?: string[];
   /** Non-empty means the sheet is watermarked and must not ship. */
   problems?: string[];
 }
@@ -74,15 +81,21 @@ export function renderProofSheet(input: ProofSheetInput): string {
   const specRows = primary ? [
     ['CHANNEL LETTER TYPE', TYPES[spec.type].name],
     ['FACE COLOR', faceColourOf(primary)],
-    ['FACE COLOR TREATMENT', primary.face.vinylApplication ? 'Vinyl application' : 'Per Logo'],
+    ['FACE COLOR TREATMENT', faceTreatment(primary)],
     ['TRIM CAP COLOR', trimLabel(primary.trimCap)],
     ['RETURN COLOR', returnColourOf(primary)],
     ['RETURN DEPTH', formatInches(depthOf(primary))],
+    // Illumination is a spec-block line in its own right: the type says where
+    // the light goes, this says what makes it and in what colour.
+    ['ILLUMINATION', illuminationLabel(spec, primary)],
   ] : [];
 
   const footer = [
     ['INSTALLATION METHOD', MOUNTS[spec.mount].label],
-    ['BACKER PANEL OPTIONS', spec.backer.present ? spec.backer.shape.replace(/-/g, ' ') : 'No backer'],
+    // A pan is quoted on its returns, so the depth belongs beside the shape.
+    ['BACKER PANEL OPTIONS', spec.backer.present
+      ? `${spec.backer.shape.replace(/-/g, ' ')}${spec.backer.depth ? ` · ${formatInches(spec.backer.depth)} deep` : ''}`
+      : 'No backer'],
     ['BACKER PANEL COLOR', spec.backer.present ? spec.backer.colour : '—'],
     ['SIGN QUANTITY', String(spec.quantity)],
     ['MAX SIGN AREA ALLOWED', spec.site?.permittedAreaSqFt ? `${spec.site.permittedAreaSqFt} sq ft` : 'Not provided'],
@@ -173,6 +186,7 @@ export function renderProofSheet(input: ProofSheetInput): string {
     ${block('THINGS TO CONFIRM', disclosures.warnings.map((c) => c.text))}
     ${block('DEFAULTS APPLIED', disclosures.defaults.map((c) => c.text))}
     ${block('NEEDS A HUMAN', disclosures.escalations.map((c) => `[${c.ruleId}] ${c.text}`))}
+    ${block('DESIGN GUIDANCE', input.guidance ?? [])}
     ${block('NOTES', STANDING_NOTES)}
     ${disclosures.derivedValues.length ? block(
       'DERIVED VALUES USED (not vendor-confirmed)',
@@ -209,6 +223,29 @@ const block = (title: string, items: string[]): string =>
     <h3>${title}</h3>
     <ul>${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>
   </div>`;
+
+/**
+ * §1.3 CL-S-06. A day/night face is dark by day and glows in the stated FACE
+ * COLOR at night, so the row above it means something different — the sheet
+ * has to say which of the two the customer is looking at in the day panel.
+ */
+function faceTreatment(el: SignSpec['elements'][number]): string {
+  const parts: string[] = [];
+  if (isDayNightFace(el)) parts.push('Day/Night face — dark by day, illuminated at night');
+  if (el.face.vinylApplication) parts.push('Vinyl application');
+  return parts.length > 0 ? parts.join(' · ') : 'Per Logo';
+}
+
+/** LED and its colour, or "Non-illuminated". Never fabrication hardware. */
+function illuminationLabel(spec: SignSpec, el: SignSpec['elements'][number]): string {
+  if (!el.lit) return 'Non-illuminated';
+  const mode = TYPES[spec.type].illumination;
+  const where = mode === 'front+halo' ? 'Front and halo lit'
+    : mode === 'halo' ? 'Halo lit'
+    : mode === 'side' ? 'Side lit'
+    : 'Front lit';
+  return `${where} · LED${el.ledColour ? ` — ${el.ledColour}` : ''}`;
+}
 
 function trimLabel(tc: { kind: string; width?: number; brand?: string; colour?: string; code?: string; paintedTo?: string }): string {
   if (tc.kind === 'none') return 'n/a';

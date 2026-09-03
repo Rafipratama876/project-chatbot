@@ -6,6 +6,7 @@ import { buildRenderContract, verifyContract } from '#/kb/render/contract.js';
 import { heavenCrepes, haloFlush, nonLitTagline } from './fixtures/jobs.js';
 import { blockWord, logoMark } from './fixtures/blockGlyphs.js';
 import type { JobInput } from '#/kb/domain/spec.js';
+import { isDayNightFace, faceRenderColour, DAY_NIGHT_DAY_APPEARANCE } from '#/kb/domain/spec.js';
 
 /** A sign that is only a logo mark — the §3.5 step 1 branch. */
 const logoMarkJob = (): JobInput => ({
@@ -158,5 +159,32 @@ describe('§9.2 logo box', () => {
     const { spec } = await runEngine(logoMarkJob());
     const box = spec.elements.find((e) => e.construction === 'CL-C-03')!;
     expect(box.copyTreatment).toBeUndefined();
+  });
+});
+
+describe('§9.3 sheet — what the training deck asks a proof to carry', () => {
+  it('prints the reading distances from the letter visibility chart', async () => {
+    const { spec, trace } = await runEngine(haloFlush());
+    const proof = assembleProof(spec, trace);
+    expect(proof.sheetHtml).toContain('DESIGN GUIDANCE');
+    // The same sentences the proof already computed, not a second calculation.
+    for (const line of proof.guidance) expect(proof.sheetHtml).toContain(line.replace(/"/g, '&quot;'));
+  });
+
+  it('states the illumination beside the face and return', async () => {
+    const { spec, trace } = await runEngine(haloFlush());
+    expect(assembleProof(spec, trace).sheetHtml).toMatch(/ILLUMINATION/);
+  });
+
+  it('CL-S-06: a day/night face says so, and renders dark by day', async () => {
+    const { spec, trace } = await runEngine(heavenCrepes());
+    const letters = spec.elements.find((e) => e.construction === 'CL-C-01')!;
+    letters.face.dayNight = true;
+
+    expect(isDayNightFace(letters)).toBe(true);
+    expect(faceRenderColour(letters, 'day')).toBe(DAY_NIGHT_DAY_APPEARANCE);
+    // The night appearance is still the colour the spec block states.
+    expect(faceRenderColour(letters, 'night')).toBe(letters.face.renderColour ?? letters.face.colour);
+    expect(assembleProof(spec, trace).sheetHtml).toMatch(/Day\/Night face/);
   });
 });

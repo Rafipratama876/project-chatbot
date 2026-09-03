@@ -195,6 +195,8 @@ export interface FaceSpec {
   printed?: boolean;
   largeOpenAreas?: boolean;
   vinylApplication?: boolean;
+  /** §1.3 CL-S-06: dark by day, glows in `colour` at night. */
+  dayNight?: boolean;
 }
 
 export interface BoxSpec {
@@ -362,3 +364,26 @@ export const depthOf = (el: SignElement): Inches => resolved(el.returnDepth, el,
 export const returnColourOf = (el: SignElement): string => resolved(el.returnColour, el, 'returnColour');
 export const faceColourOf = (el: SignElement): string => resolved(el.face.colour, el, 'face.colour');
 export const faceMaterialOf = (el: SignElement): FaceMaterial => resolved(el.face.material, el, 'face.material');
+
+/**
+ * What the face looks like in daylight.
+ *
+ * A day/night face (§1.3 CL-S-06, Acrylite day/night acrylic and day/night
+ * vinyl) is not the colour the spec block states: it reads dark grey by day
+ * and glows in its stated colour once the LEDs are on. Rendering the night
+ * colour in the day panel is the same class of error as a halo that glows in
+ * daylight — it shows the customer a sign that does not exist at noon.
+ *
+ * The spec block is untouched by this: FACE COLOR still states the colour the
+ * fabricator buys. This is the day appearance only.
+ */
+export const DAY_NIGHT_DAY_APPEARANCE = '#2f3032';
+
+export const isDayNightFace = (el: SignElement): boolean =>
+  el.face.material === 'day-night-acrylic' || el.face.dayNight === true;
+
+/** Face colour for a given view, device value included (§4.7 render-only). */
+export const faceRenderColour = (el: SignElement, view: 'day' | 'night'): string =>
+  view === 'day' && isDayNightFace(el)
+    ? DAY_NIGHT_DAY_APPEARANCE
+    : (el.face.renderColour ?? faceColourOf(el));

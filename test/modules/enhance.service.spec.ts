@@ -64,12 +64,12 @@ const spec = {
   elements: [{ returnDepth: 5 }],
 } as unknown as SignSpec;
 
-/** Replaces the network call with a model that returns `image`. */
+/** Replaces the network call with a model that returns one candidate: `image`. */
 function withModel(svc: EnhanceService, image: Buffer | (() => never)) {
   vi.spyOn(svc as never, 'callModel' as never).mockImplementation((async () => {
     if (typeof image === 'function') image();
     const decoded = PNG.sync.read(image as Buffer);
-    return { width: decoded.width, height: decoded.height, data: decoded.data };
+    return [{ width: decoded.width, height: decoded.height, data: decoded.data }];
   }) as never);
 }
 
@@ -214,5 +214,53 @@ describe('the enhancement pass', () => {
     expect(out.reason).toMatch(/generative model/);
     expect(out.reason).toMatch(/deterministic render/);
     expect(out.reason).toMatch(/verified/);
+  });
+});
+
+describe('what the prompts say about a backer at night', () => {
+  const withBacker = (type: string, present: boolean) => ({
+    base: basePng(),
+    renderedCoverage: coveragePng(),
+    onPhotograph: false,
+    view: 'night' as const,
+    spec: {
+      jobId: 'j',
+      businessName: 'B',
+      type,
+      elements: [{ returnDepth: 5 }],
+      backer: { present },
+    } as unknown as SignSpec,
+  });
+
+  const prompt = (svc: EnhanceService, name: 'realismPrompt' | 'fullAiPrompt', input: unknown) =>
+    (svc as unknown as Record<string, (i: unknown) => string>)[name]!(input);
+
+  it('tells the model the halo sits between the copy and the panel', () => {
+    // Left unsaid, a dark plaque with bright copy on it reads to the model as a
+    // lightbox, and it lights the wall around the whole panel instead — which
+    // is a different product from the one the spec block describes.
+    const svc = service();
+    for (const name of ['realismPrompt', 'fullAiPrompt'] as const) {
+      const text = prompt(svc, name, withBacker('CL-T-02', true));
+      expect(text).toMatch(/BETWEEN the copy and the backer panel/);
+      expect(text).toMatch(/ring of light around the outside of the panel is wrong/);
+    }
+  });
+
+  it('says a front-lit panel does not emit either', () => {
+    const text = prompt(service(), 'realismPrompt', withBacker('CL-T-01', true));
+    expect(text).toMatch(/not a lightbox and does not emit/);
+    expect(text).not.toMatch(/BETWEEN the copy/);
+  });
+
+  it('says nothing about a panel when there is none', () => {
+    const text = prompt(service(), 'fullAiPrompt', withBacker('CL-T-02', false));
+    expect(text).not.toMatch(/backer panel behind/i);
+    expect(text).not.toMatch(/lightbox/);
+  });
+
+  it('says nothing about the halo by day', () => {
+    const input = { ...withBacker('CL-T-02', true), view: 'day' as const };
+    expect(prompt(service(), 'realismPrompt', input)).not.toMatch(/lightbox/);
   });
 });

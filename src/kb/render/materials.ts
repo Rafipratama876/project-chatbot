@@ -159,6 +159,33 @@ export function applyReflections(
   });
 }
 
+/**
+ * How hard a lit face has to emit to read as lit.
+ *
+ * A backlit face is a light source, and its brightness comes from the LED
+ * behind it, not from how dark the pigment is. Emitting every colour at 1
+ * ignores that: FedEx orange (#ff6600) already has a channel at full and
+ * blazes, while FedEx purple (#4d148c) tops out at 0.55 and renders as a dark
+ * shape on a dark wall — the "F" disappeared into the background while the
+ * "Ex" beside it read perfectly, on one sign, with both colours specified.
+ *
+ * So the emission is scaled until the BRIGHTEST channel reaches full and no
+ * further. Every channel is scaled by the same factor, so the hue is exactly
+ * the specified one — the constraint that matters, because FACE COLOR is a
+ * spec-block line the customer reads off the picture. Stopping at the first
+ * channel to reach full is also what keeps it that way: any more and that
+ * channel clips while the others keep climbing, which is precisely how a
+ * saturated colour turns pale and wrong.
+ */
+export function litEmissiveIntensity(colour: THREE.Color): number {
+  const peak = Math.max(colour.r, colour.g, colour.b);
+  if (peak <= 0) return 1;
+  return Math.min(MAX_LIT_GAIN, 1 / peak);
+}
+
+/** A near-black face is not a lamp. Past this it would only amplify noise. */
+const MAX_LIT_GAIN = 4;
+
 export function faceMaterial(input: FaceMaterialInput): THREE.MeshPhysicalMaterial {
   const c = resolveColour(input.colour);
   const lit = input.truth.faceEmissive && input.view === 'night';
@@ -182,7 +209,7 @@ export function faceMaterial(input: FaceMaterialInput): THREE.MeshPhysicalMateri
     // No environment ever reaches a face — see ENV_REFLECTANCE.
     envMapIntensity: 0,
     emissive: input.truth.faceEmissive ? c : new THREE.Color(0x000000),
-    emissiveIntensity: lit ? 1 : 0,
+    emissiveIntensity: lit ? litEmissiveIntensity(c) : 0,
     toneMapped: !lit,
     side: THREE.FrontSide,
   });
@@ -204,7 +231,7 @@ export function setFaceLit(
   const c = resolveColour(colour);
   material.color = lit ? new THREE.Color(0x000000) : c;
   material.emissive = lit ? c : new THREE.Color(0x000000);
-  material.emissiveIntensity = lit ? 1 : 0;
+  material.emissiveIntensity = lit ? litEmissiveIntensity(c) : 0;
   material.toneMapped = !lit;
   material.envMapIntensity = 0;
   material.needsUpdate = true;

@@ -140,6 +140,28 @@ export type BackerShape = (typeof BACKER_SHAPES)[number];
 export const BACKER_MIN_DEPTH_WITH_SUPPLIES: Inches = 4;
 export const BACKER_DEFAULT_ACRYLIC_THICKNESS: Inches = 1 / 4;
 
+/**
+ * A pan is not a sheet.
+ *
+ * §4.5 lists the pan shapes beside the flat ones as separate products, and the
+ * difference is the whole of it: a pan is folded with returns, so it stands off
+ * the wall and has an edge that catches light and casts a shadow. Drawn at
+ * sheet thickness it reads as a flat plate — the thing the customer is looking
+ * at in the proof is then not the thing being quoted.
+ *
+ * Kept shallow on purpose. The pan only has to read AS a pan — an edge that
+ * catches light and puts a line of shadow under itself. Any deeper and it eats
+ * the projection of the letters standing on it, which is the thing the proof is
+ * actually there to show.
+ *
+ * `[DER]` — a house minimum, not a vendor figure. Confirm with fabrication.
+ */
+export const BACKER_PAN_MIN_DEPTH: Inches = 1.25;
+export const BACKER_FLAT_THICKNESS: Inches = 0.5;
+
+export const isPanBacker = (shape: BackerShape): boolean =>
+  shape === 'straight-aluminium-pan' || shape === 'contour-pan' || shape === 'letter-bubble';
+
 // ── §4.6 Raceway / wireway ─────────────────────────────────────────────────
 
 export const RACEWAY_STANDARD = { h: 4.75, d: 5 };
