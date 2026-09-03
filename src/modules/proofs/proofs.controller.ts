@@ -1,11 +1,12 @@
 import {
   BadRequestException, Body, Controller, Get, Header, NotFoundException,
-  Param, Post, Query, Res,
+  Param, Post, Query, Res, UseGuards,
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 import { createReadStream } from 'node:fs';
 import path from 'node:path';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { ApiKeyGuard } from '#/modules/auth/api-key.guard.js';
 import { ZodError } from 'zod';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
@@ -19,6 +20,12 @@ import { renderSpecBlock } from '#/kb/output/specBlock.js';
 import { renderDisclosures, buildDisclosures } from '#/kb/output/disclosures.js';
 
 @ApiTags('proofs')
+@ApiSecurity('x-api-key')
+// A proof is a customer's building, their artwork and their prices. The panel
+// and board routes hand those back as plain images off a UUID, and the render
+// bundle publishes those URLs to another service — so the id travels, and an
+// unauthenticated route would make it a credential.
+@UseGuards(ApiKeyGuard)
 @Controller({ path: 'proofs', version: '1' })
 export class ProofsController {
   constructor(

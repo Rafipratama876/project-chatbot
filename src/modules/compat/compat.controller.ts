@@ -1,22 +1,24 @@
 import {
-  BadRequestException, Body, Controller, Get, Param, Post, Req, UnauthorizedException,
+  BadRequestException, Body, Controller, Get, Param, Post, Req, UseGuards,
 } from '@nestjs/common';
+import { ApiSecurity } from '@nestjs/swagger';
 import type { FastifyRequest } from 'fastify';
+import { ApiKeyGuard } from '#/modules/auth/api-key.guard.js';
 import { CompatService } from './compat.service.js';
 
+@ApiSecurity('x-api-key')
+@UseGuards(ApiKeyGuard)
 @Controller({ path: 'chatbot', version: '1' })
 export class CompatController {
   constructor(private readonly compat: CompatService) {}
 
   @Get('personalities')
-  personalities(@Req() request: FastifyRequest) {
-    authorize(request);
+  personalities() {
     return envelope(this.compat.personalities());
   }
 
   @Post('sessions')
   async create(@Body() body: Record<string, unknown>, @Req() request: FastifyRequest) {
-    authorize(request);
     const input = request.isMultipart() ? await multipartFields(request) : body;
     const personality = String(input.personalityId ?? '');
     if (!['channel-letters', 'personalities-channel-letters'].includes(personality)) {
@@ -28,20 +30,15 @@ export class CompatController {
   }
 
   @Get('sessions/:id')
-  async get(@Param('id') id: string, @Req() request: FastifyRequest) {
-    authorize(request);
+  async get(@Param('id') id: string) {
     return envelope(await this.compat.get(id));
   }
 
   @Post('sessions/:id/messages')
-  async send(
-    @Param('id') id: string,
-    @Body() body: Record<string, unknown>,
-    @Req() request: FastifyRequest,
-  ) {
-    authorize(request);
+  async send(@Param('id') id: string, @Body() body: Record<string, unknown>) {
     return envelope(await this.compat.send(id, body));
   }
+
 }
 
 async function multipartFields(request: FastifyRequest): Promise<Record<string, unknown>> {
@@ -66,10 +63,4 @@ function parseJson(value: string): unknown {
 
 function envelope<T>(data: T) {
   return { success: true, data };
-}
-
-function authorize(request: FastifyRequest): void {
-  const expected = process.env.API_KEY;
-  if (!expected) throw new UnauthorizedException('API_KEY is not configured');
-  if (request.headers['x-api-key'] !== expected) throw new UnauthorizedException('Invalid API key');
 }
