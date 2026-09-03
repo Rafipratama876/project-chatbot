@@ -4,11 +4,12 @@ import { PNG } from 'pngjs';
 import OpenAI, { toFile } from 'openai';
 import {
   protectionMask, summarise, maskToRgba, restoreProtected, verifyProtected,
-  verifyCompositedSign, logoColourLeakFraction, ProtectionError,
+  verifyCompositedSign, logoColourLeakFraction, colourDriftFraction, ProtectionError,
 } from '#/kb/render/protect.js';
 import {
   contactOcclusion, lightSpill, integrate, applySpill, measureIlluminant, temper,
 } from '#/kb/render/integrate.js';
+import { resolveColour } from '#/kb/render/materials.js';
 import type { SignSpec } from '#/kb/domain/spec.js';
 import { TYPES } from '#/kb/domain/taxonomy.js';
 
@@ -344,12 +345,22 @@ export class EnhanceService implements OnApplicationBootstrap {
      * own alpha.
      */
     lettersMask?: Buffer | null;
+    /**
+     * The backer panel, isolated — transparent everywhere outside its own
+     * footprint. Null on a construction with none. Given its own material
+     * pass (see `enhanceBacker`) rather than being left inside `signLayer`:
+     * it is a real, specified, physical plaque, the same category of object
+     * the wall is, and it deserves the wall's own realism treatment rather
+     * than sitting there as a flat, unlit slab lit only by the same lamps
+     * that light the copy — which is what it was before this existed.
+     */
+    backerLayer?: Buffer | null;
   }): Promise<{ png: Buffer | null; reason: string }> {
     if (!this.enabled) return { png: null, reason: 'enhancement is switched off' };
 
     let sign = PNG.sync.read(input.signLayer);
     try {
-      const ground = await this.enhanceGround(input, sign.width, sign.height);
+      let ground = await this.enhanceGround(input, sign.width, sign.height);
 
       if (input.relight) {
         // Half the measured cast, not all of it: what is measured is the
@@ -366,6 +377,40 @@ export class EnhanceService implements OnApplicationBootstrap {
             `relight skipped, using the neutral sign layer: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
+      }
+
+      let backerApplied = false;
+      if (input.backerLayer) {
+        const backerFinal = await this.enhanceBacker({
+          backerLayer: input.backerLayer,
+          ground,
+          view: input.view,
+          spec: input.spec,
+        });
+        backerApplied = backerFinal.ai;
+        const backerAlpha = new Uint8Array(backerFinal.png.width * backerFinal.png.height);
+        for (let i = 0; i < backerAlpha.length; i++) backerAlpha[i] = backerFinal.png.data[i * 4 + 3]!;
+
+        // Same idea as the letters' own standoff below, at the backer's: how
+        // far off the wall it stands sets how tight a contact shadow it
+        // throws around its own edge.
+        const backerStandoff = Math.max(input.spec.backer.depth, 0.25);
+        const backerRadius = Math.max(
+          2, Math.min(24, (ground.width / 90) * backerStandoff * 0.35),
+        );
+        const pasted = integrate(
+          new Uint8ClampedArray(ground.data), new Uint8ClampedArray(backerFinal.png.data),
+          ground.width, ground.height,
+          {
+            occlusion: contactOcclusion(
+              backerAlpha, ground.width, ground.height, backerRadius,
+              input.view === 'night' ? 0.28 : 0.45,
+            ),
+          },
+        );
+        const out = new PNG({ width: ground.width, height: ground.height });
+        out.data = Buffer.from(pasted);
+        ground = out;
       }
 
       const merged = this.seatSign(
@@ -386,7 +431,15 @@ export class EnhanceService implements OnApplicationBootstrap {
           + 'model: it is the deterministic render, composited back over that wall by this '
           + 'machine and verified against the specification pixel for pixel. The glow it '
           + 'casts on the wall, and the light the wall casts back onto it, are computed '
-          + 'rather than drawn.',
+          + 'rather than drawn.'
+          + (input.backerLayer
+            ? (backerApplied
+              ? ' The backer panel was given its own material pass, clipped back to its exact '
+                + 'shape afterwards — its outline is the deterministic render, its material is '
+                + 'the model\'s.'
+              : ' The backer panel\'s material pass was unavailable; it is shown as rendered, '
+                + 'unlit.')
+            : ''),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -496,6 +549,147 @@ export class EnhanceService implements OnApplicationBootstrap {
     const out = new PNG({ width: sign.width, height: sign.height });
     out.data = Buffer.from(merged);
     return { ok: true, png: PNG.sync.write(out), compared: check.compared };
+  }
+
+  /**
+   * The backer panel's own material pass.
+   *
+   * A dedicated call rather than a mask opened up on the full panel: the
+   * backer is rendered here on its own, transparent everywhere outside its
+   * footprint, so nothing else in the frame — the letters least of all — is
+   * ever in the same picture a model sees. Whatever comes back is clipped
+   * back to the backer's own deterministic alpha before it is trusted: the
+   * mask tells the model roughly where to paint, but only pixels this
+   * renderer itself decided are backer ever reach the frame, which is what
+   * keeps a contour panel's precise cut from drifting under a no-mask edit.
+   *
+   * Several candidates are drawn from one call and scored by
+   * `colourDriftFraction` against the backer's own specified colour, the
+   * same way the logo-only pass scores its candidates by how much of the
+   * mark leaked — a diffusion edit does not reliably keep a panel close to
+   * the colour it was told, and the fix already proven here is another
+   * draw, not a tighter prompt.
+   *
+   * Never throws. A failed call falls back to the deterministic, unlit
+   * panel — the same picture this construction rendered before this pass
+   * existed — because a presentation layer is never allowed to cost a proof
+   * its backer.
+   */
+  private async enhanceBacker(input: {
+    backerLayer: Buffer;
+    /** The (already AI-enhanced) wall — context for the call only, discarded. */
+    ground: PNG;
+    view: 'day' | 'night';
+    spec: SignSpec;
+  }): Promise<{ png: PNG; ai: boolean }> {
+    const backer = PNG.sync.read(input.backerLayer);
+    const backerAlpha = new Uint8Array(backer.width * backer.height);
+    for (let i = 0; i < backerAlpha.length; i++) backerAlpha[i] = backer.data[i * 4 + 3]!;
+
+    try {
+      const client = this.getClient();
+
+      // Context for the call: the backer over the wall, opaque. The model
+      // needs a real picture to react to, not a mostly-transparent canvas —
+      // but this is scaffolding, not output. Everything outside the mask is
+      // discarded on the way out, so it does not matter that this wall is
+      // not the one the finished panel actually uses.
+      const context = new PNG({ width: backer.width, height: backer.height });
+      context.data = Buffer.from(integrate(
+        new Uint8ClampedArray(input.ground.data), new Uint8ClampedArray(backer.data),
+        backer.width, backer.height, {},
+      ));
+
+      const editable = new Uint8Array(backerAlpha.length);
+      for (let i = 0; i < editable.length; i++) editable[i] = backerAlpha[i]! > 4 ? 1 : 0;
+      const maskPng = new PNG({ width: backer.width, height: backer.height });
+      maskPng.data = Buffer.from(maskToRgba(editable, backer.width, backer.height));
+
+      const candidates = this.config.get<number>('enhance.candidates') ?? 2;
+      const result = await client.images.edit(
+        {
+          model: this.config.get<string>('enhance.model') ?? 'gpt-image-1',
+          image: await toFile(PNG.sync.write(context), 'backer.png', { type: 'image/png' }),
+          mask: await toFile(PNG.sync.write(maskPng), 'mask.png', { type: 'image/png' }),
+          prompt: this.backerPrompt(input),
+          size: pickEditSize(backer.width, backer.height) as never,
+          n: candidates,
+        },
+        { timeout: this.config.get<number>('enhance.timeoutMs') ?? 90_000 },
+      );
+      if (!result.data || result.data.length === 0) {
+        throw new Error('the image endpoint returned no image');
+      }
+
+      // A neutral fallback on purpose, not the resolver's own default: a
+      // backer colour this table does not recognise should score every
+      // candidate as undrifted (an achromatic target always does, per
+      // `colourDriftFraction`) rather than against a wrong hue it made up.
+      const target = resolveColour(input.spec.backer.colour, '#808080');
+      const targetRgb = { r: Math.round(target.r * 255), g: Math.round(target.g * 255), b: Math.round(target.b * 255) };
+
+      let best: { png: PNG; drift: number } | null = null;
+      for (const d of result.data) {
+        if (!d.b64_json) continue;
+        const raw = resample(PNG.sync.read(Buffer.from(d.b64_json, 'base64')), backer.width, backer.height);
+
+        const clipped = new PNG({ width: backer.width, height: backer.height });
+        for (let i = 0; i < backerAlpha.length; i++) {
+          const o = i * 4;
+          clipped.data[o] = raw.data[o]!;
+          clipped.data[o + 1] = raw.data[o + 1]!;
+          clipped.data[o + 2] = raw.data[o + 2]!;
+          clipped.data[o + 3] = backerAlpha[i]!;
+        }
+
+        const drift = colourDriftFraction(clipped.data, editable, targetRgb);
+        if (!best || drift < best.drift) best = { png: clipped, drift };
+      }
+      if (!best) throw new Error('the image endpoint returned no usable image');
+
+      this.logger.log(
+        `backer material pass: best of ${result.data.length}, `
+        + `colour drift ${(best.drift * 100).toFixed(1)}%`,
+      );
+      return { png: best.png, ai: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`backer material pass skipped, using the deterministic panel: ${message}`);
+      return { png: backer, ai: false };
+    }
+  }
+
+  /**
+   * What the model is told when it owns only the backer panel.
+   *
+   * The letters never appear in this picture — they are composited on top
+   * afterwards, over the halo, which is also never in this picture — so the
+   * prompt says as much rather than leaving the model to guess why a plaque
+   * sits there with nothing mounted to it.
+   */
+  private backerPrompt(input: { view: 'day' | 'night'; spec: SignSpec }): string {
+    const colour = input.spec.backer.colour;
+    const night = input.view === 'night';
+    return [
+      `The masked area is a backer panel — a real, physical plaque that a sign's letters `
+        + `mount to, specified in ${colour}.`,
+      'Render it as a real object: a visible material that reads as that colour (brushed '
+        + 'metal, painted aluminium composite, whatever suits it best), real screws or '
+        + 'standoffs where it meets the wall, proper specular highlights and a touch of '
+        + 'surface grain. It should read as something you could reach out and touch, not a '
+        + 'flat colour swatch.',
+      night
+        ? 'It is night. The letters that mount to this panel, and the glow they throw close '
+          + 'around themselves, are composited on afterwards and are not in this picture — '
+          + 'keep the panel itself dark and believable for that: no light source of its own, '
+          + 'no even studio lighting, no glow of any kind painted onto it.'
+        : 'It is daytime: soft natural light and a believable material.',
+      `Keep the panel close to its own specified colour, ${colour} — shift it for realistic `
+        + 'material and light, not into a different colour altogether.',
+      'The area outside the mask is scaffolding for this call only and is discarded '
+        + 'afterwards — ignore it, and do not let anything you draw there guide what belongs '
+        + 'inside the mask.',
+    ].join('\n');
   }
 
   /**

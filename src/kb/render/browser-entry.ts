@@ -84,7 +84,7 @@ declare global {
         /** Skip the ground pass — used for the relit second sign render. */
         signOnly?: boolean;
       },
-    ) => Promise<{ sign: string; background: string; halo: string | null; lettersMask: string }>;
+    ) => Promise<{ sign: string; background: string; halo: string | null; lettersMask: string; backer: string | null }>;
   }
 }
 
@@ -752,6 +752,14 @@ function setHaloVisible(scene: THREE.Scene, visible: boolean): void {
   });
 }
 
+/** Shows or hides the backer panel, so it can be rendered in isolation. */
+function setBackerVisible(scene: THREE.Scene, visible: boolean): void {
+  scene.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (mesh.isMesh && /backer panel/i.test(mesh.name)) mesh.visible = visible;
+  });
+}
+
 function blurredHalo(
   renderer: THREE.WebGLRenderer,
   scene: THREE.Scene,
@@ -1110,7 +1118,7 @@ async function renderLayers(
     illuminant?: { r: number; g: number; b: number };
     signOnly?: boolean;
   },
-): Promise<{ sign: string; background: string; halo: string | null; lettersMask: string }> {
+): Promise<{ sign: string; background: string; halo: string | null; lettersMask: string; backer: string | null }> {
   const { width, height, view } = opts;
   const camera = opts.camera ?? 'detail-perspective';
 
@@ -1143,21 +1151,67 @@ async function renderLayers(
   signScene.setSurface('composite');
   const cam = makeCamera(signScene, camera, width, height).camera;
 
-  // No halo geometry in this path.
+  // No halo geometry in this path, and — new — no backer panel either.
   //
   // The shells are twenty-eight stacked offset outlines, and summed they fill
   // SOLID out to the halo's whole reach — so drawn into the frame they are not
   // a glow at all, they are a white plaque the shape of the copy sitting behind
   // it. Blurring them does not rescue that: the source is solid, so the blur
-  // keeps a solid core and only softens its rim.
+  // keeps a solid core and only softens its rim. It gets its own pass below.
   //
-  // The light here is a real one instead. `applyEnvironment` puts a lamp in the
-  // standoff gap of a rear-illuminated sign; the copy blocks it, and what lands
-  // on the surface behind is a physical falloff rather than a drawing of one.
+  // The backer is a real, specified, physical plaque — the same category of
+  // object the wall is — and gets its own isolated render further down so it
+  // can go to the model for material realism on its own, the way the wall
+  // does. Left in `sign`, it would sit there as an opaque block with nothing
+  // behind it editable, and pasting a backer-shaped hole of AI material under
+  // an already-opaque backer-shaped block of deterministic pixels is a no-op:
+  // the block simply covers whatever was drawn beneath it.
   setHaloVisible(signScene.scene, false);
+  setBackerVisible(signScene.scene, false);
   renderer.render(signScene.scene, cam);
   setHaloVisible(signScene.scene, true);
+  setBackerVisible(signScene.scene, true);
   const sign = grab();
+
+  // The backer, isolated — nothing else in frame, transparent everywhere
+  // outside its own footprint. Null on a construction with no backer at all.
+  let backer: string | null = null;
+  if (spec.backer.present) {
+    const hiddenForBacker: THREE.Object3D[] = [];
+    signScene.scene.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh && mesh.visible && !/backer panel/i.test(mesh.name)) {
+        mesh.visible = false;
+        hiddenForBacker.push(mesh);
+      }
+    });
+
+    // The halo's point lights are not the shells `setHaloVisible` hides —
+    // those are mesh geometry; the lamps are the actual THREE.PointLights
+    // `applyEnvironment` adds to a separate rig group, and hiding a MESH
+    // does nothing to a LIGHT. Left on here, with the letters that normally
+    // block them hidden too, they shine straight onto the backer and bake a
+    // scatter of bare, unblocked hotspots into the one picture sent to the
+    // model — measured on real output: a lit surface covered in bright
+    // rounds, nothing like the halo `blurredHalo` computes separately with
+    // the letters actually blocking the light. The model, told this panel
+    // is unlit (see `backerPrompt`) but shown a lit one, kept the pattern it
+    // was given rather than the one the prompt described, and the two glows
+    // disagreed once composited — which is what read as a double image.
+    const hiddenLights: THREE.Light[] = [];
+    signScene.scene.traverse((o) => {
+      const light = o as THREE.PointLight;
+      if (light.isPointLight && light.visible) {
+        light.visible = false;
+        hiddenLights.push(light);
+      }
+    });
+
+    renderer.render(signScene.scene, cam);
+    backer = grab();
+    for (const o of hiddenForBacker) o.visible = true;
+    for (const o of hiddenLights) o.visible = true;
+  }
 
   // The halo, separately — the same shells `render()` draws for a studio
   // panel, blurred the same way (see `blurredHalo`), so it reaches the
@@ -1169,15 +1223,14 @@ async function renderLayers(
   const halo = glow ? glowDataUrl(glow, width, height) : null;
 
   // The letters and returns alone — `sign`'s own alpha with the backer panel
-  // (and the mounting surface, on a direct-mount job) subtracted out. `sign`
-  // is opaque across the whole backer, not just the copy, and `seatSign`
-  // needs to know where the copy itself is: the halo shells sit ON the
-  // backer's face, close in around each letter, and masking the glow by
-  // `sign`'s full alpha would hold it back everywhere the backer is solid —
-  // which, on a backed sign, is the halo's entire reach. `isHaloGround`
-  // already draws exactly this line for the non-layered path's own masking;
-  // this is the same test, computed here so `seatSign` does not have to parse
-  // mesh names out of a flattened PNG.
+  // and the mounting surface subtracted out. `sign` no longer carries the
+  // backer at all (see above), so this and `sign`'s own alpha agree almost
+  // everywhere now; what this still buys on top is a shadow-catcher's own
+  // faint contribution to `sign`'s alpha where a contact shadow lands on the
+  // (still-visible-for-shading) wall mesh, which `isHaloGround` excludes and
+  // `sign`'s raw alpha does not. `seatSign` needs the pure letterform: the
+  // halo shells sit tight against it, and masking the glow by anything wider
+  // holds it back exactly where it is meant to land.
   const lettersMask = alphaArrayDataUrl(
     signCoverage(renderer, signScene.scene, cam, width, height), width, height,
   );
@@ -1185,7 +1238,7 @@ async function renderLayers(
 
   if (opts.signOnly) {
     renderer.dispose();
-    return { sign, background: '', halo, lettersMask };
+    return { sign, background: '', halo, lettersMask, backer };
   }
 
   // The same scene, same camera, with everything but the mounting surface
@@ -1201,7 +1254,7 @@ async function renderLayers(
   groundScene.dispose();
 
   renderer.dispose();
-  return { sign, background, halo, lettersMask };
+  return { sign, background, halo, lettersMask, backer };
 }
 
 /**

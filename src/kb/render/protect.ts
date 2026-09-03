@@ -441,6 +441,52 @@ export function logoColourLeakFraction(
   return editable === 0 ? 0 : leaked / editable;
 }
 
+/**
+ * Fraction of the editable region whose colour has drifted off the surface's
+ * own specified colour — the same measurement `logoColourLeakFraction` makes
+ * for a duplicated mark, aimed at a plain material shift instead: a backer
+ * asked for lighting and material realism sometimes came back a different
+ * colour altogether (a specified "Yellow" panel rendered brown, say), and
+ * this is what scores a candidate for that rather than trusting the prompt
+ * to have been obeyed.
+ *
+ * Hue-based and tolerant, on purpose: real material rendering — a highlight,
+ * a shadow, a brushed-metal sheen — swings saturation and lightness across
+ * the same surface without changing its hue much, and scoring those as drift
+ * would penalise exactly the realism this pass exists to buy. What should
+ * not move is the hue itself.
+ */
+export function colourDriftFraction(
+  candidate: Uint8Array,
+  mask: Uint8Array,
+  target: { r: number; g: number; b: number },
+): number {
+  const [th, ts] = rgbToHsl(target.r, target.g, target.b);
+  // An achromatic target (near-black, near-white, genuinely grey) has no hue
+  // to drift from — measuring one against it would flag every highlight and
+  // shadow a real material throws as a "colour" shift.
+  if (ts < 0.12) return 0;
+  const targetBucket = Math.round(th * 36);
+
+  let drifted = 0;
+  let editable = 0;
+  for (let i = 0; i < mask.length; i++) {
+    if (!mask[i]) continue;
+    editable++;
+    const o = i * 4;
+    const [h, s, l] = rgbToHsl(candidate[o]!, candidate[o + 1]!, candidate[o + 2]!);
+    // A near-black shadow or a near-white highlight/specular carries no
+    // reliable hue of its own — that is real material, not drift.
+    if (s < 0.12 || l < 0.08 || l > 0.94) continue;
+    const bucket = Math.round(h * 36);
+    const distance = Math.min(Math.abs(bucket - targetBucket), 36 - Math.abs(bucket - targetBucket));
+    // ~20° either side tolerated as the same colour family: real material
+    // grading shifts a hue a little even when the paint itself has not.
+    if (distance > 2) drifted++;
+  }
+  return editable === 0 ? 0 : drifted / editable;
+}
+
 export function preserveChroma(
   base: Raster,
   working: Uint8Array,
