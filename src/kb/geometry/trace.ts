@@ -139,6 +139,7 @@ export function traceImage(image: RasterImage, opts: TraceOptions = {}): TraceRe
   const minArea = Math.max(4, width * height * minRegionRatio);
   const contours: Contour[] = [];
   const usedColours: string[] = [];
+  const traceStats = { ribbonHolesDropped: 0 };
 
   palette.forEach((colour, index) => {
     const mask = new Uint8Array(width * height);
@@ -148,13 +149,22 @@ export function traceImage(image: RasterImage, opts: TraceOptions = {}): TraceRe
     }
     if (count < minArea) return;
 
-    const traced = traceMask(mask, width, height, tolerance, minArea);
+    const traced = traceMask(mask, width, height, tolerance, minArea, traceStats);
     if (traced.length === 0) return;
 
     const hex = toHex(colour);
     usedColours.push(hex);
     for (const c of traced) contours.push({ ...c, colour: hex });
   });
+
+  if (traceStats.ribbonHolesDropped > 0) {
+    notes.push(
+      `${traceStats.ribbonHolesDropped} thin enclosed line(s) inside the mark's own strokes were `
+      + 'treated as a decorative inset or bevel rather than a real counter, and left filled — a '
+      + 'genuine counter (a bowl, a hole) is not this narrow. Check the traced outline against the '
+      + 'source if a letter should have an opening here.',
+    );
+  }
 
   // ── Quality ─────────────────────────────────────────────────────────────
   const markWidthPx = Math.max(0, markMaxX - markMinX + 1);
@@ -283,8 +293,29 @@ function quantise(samples: Rgb[], maxColours: number): Rgb[] {
 
     const box = boxes[widest]!;
     const sorted = [...box].sort((a, b) => a[widestChannel] - b[widestChannel]);
-    const mid = sorted.length >> 1;
-    boxes = [...boxes.slice(0, widest), sorted.slice(0, mid), sorted.slice(mid), ...boxes.slice(widest + 1)];
+
+    // At the channel's own midrange, not at the population median. A logo
+    // mark is flat fills, not a photograph: a thin outline stroke in a
+    // colour of its own (a red line around a mostly-black-and-white icon,
+    // say) is a tiny fraction of the PIXEL COUNT next to the ink and fills
+    // around it, so splitting at the point that puts equal PIXELS on each
+    // side lands inside the dominant fill instead of at the boundary
+    // between the two colours — the minority colour never gets its own box
+    // and comes out of `average()` blended into a muddy in-between that is
+    // neither. Splitting at the midpoint of the range instead draws the
+    // line where the two colours actually are furthest apart, however
+    // lopsided the pixel counts either side of it. Measured on real
+    // output: a red rgb(117,14,18) outline against rgb(39,39,39) text
+    // merged into rgb(55,34,35) at the population median; splitting at
+    // R's own midrange (78) instead kept them as two separate colours.
+    const lo = sorted[0]![widestChannel];
+    const hi = sorted[sorted.length - 1]![widestChannel];
+    const midValue = (lo + hi) / 2;
+    let cut = sorted.findIndex((p) => p[widestChannel] > midValue);
+    if (cut < 0) cut = sorted.length;
+    cut = Math.min(sorted.length - 1, Math.max(1, cut));
+
+    boxes = [...boxes.slice(0, widest), sorted.slice(0, cut), sorted.slice(cut), ...boxes.slice(widest + 1)];
   }
 
   return boxes.filter((b) => b.length > 0).map(average).sort(byLuminance);
@@ -333,6 +364,7 @@ const toHex = (c: Rgb): string =>
  */
 function traceMask(
   mask: Uint8Array, width: number, height: number, tolerance: number, minArea: number,
+  stats: { ribbonHolesDropped: number },
 ): Contour[] {
   const solid = (x: number, y: number): boolean =>
     x >= 0 && y >= 0 && x < width && y < height && mask[y * width + x] === 1;
@@ -392,7 +424,44 @@ function traceMask(
   }
 
   // A loop nested inside an odd number of others is a counter.
-  return orientContours(contours);
+  const oriented = orientContours(contours);
+
+  // Not every enclosed loop is a counter. A "3D sticker" style mark draws an
+  // inner highlight or bevel line just inside each stroke, in a colour of its
+  // own — one colour's mask alone, that reads as a thin closed ring hugging
+  // the inside of the letterform, topologically identical to a real counter.
+  // Punched out as one, "I" and "J" come back with a sliver missing down
+  // their own stroke — solid letters read as split in two, which is the
+  // shape a real counter (R's bowl, O's centre) never takes: those are
+  // chunky, not ribbons. Measured on a real "3D sticker" mark: R's genuine
+  // bowl has a long:short bounding-box ratio of ~1.5; the bevel-line
+  // artefacts inside "I" and "J" ran ~4.3 and ~5.0. Dropping a hole this
+  // elongated keeps the letter solid instead of carving a decorative line
+  // into it — the only thing a real fabricated letter could do with a groove
+  // it cannot cut anyway.
+  return oriented.filter((c) => {
+    const drop = c.hole && isRibbonHole(c.points);
+    if (drop) stats.ribbonHolesDropped++;
+    return !drop;
+  });
+}
+
+/** Long:short bounding-box ratio past which an enclosed loop reads as a thin decorative line rather than a real counter. */
+const RIBBON_ASPECT_RATIO = 3;
+
+function isRibbonHole(points: Pt[]): boolean {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of points) {
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.y > maxY) maxY = p.y;
+  }
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const long = Math.max(w, h);
+  const short = Math.max(1, Math.min(w, h));
+  return long / short > RIBBON_ASPECT_RATIO;
 }
 
 /**

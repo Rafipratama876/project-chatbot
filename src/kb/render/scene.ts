@@ -20,7 +20,7 @@ import {
   resolveColour, setFaceLit, type View,
 } from './materials.js';
 import { offsetContours, ringAround } from '../geometry/offset.js';
-import { pointInContours } from '../geometry/poly.js';
+import { pointInContours, absArea } from '../geometry/poly.js';
 import { TRIM_CAP_PROJECTION, RACEWAY_STANDARD, WIREWAY_STANDARD } from '../domain/materials.js';
 import { applyEnvironment } from './lighting.js';
 import { ENVIRONMENT_INTENSITY } from './environment.js';
@@ -588,14 +588,34 @@ function buildBox(
     const byColour = groupByColour(el.contours);
     if (byColour.length > 1 || byColour[0]?.colour) {
       face.visible = false;
-      for (const group of byColour) {
+
+      // Ordered by total area, largest first — a big background fill (a
+      // sticker mark's own cream border, say) and a small foreground detail
+      // (one letter's ink) share the artwork's own coordinates, and every
+      // colour drawn at the identical face depth z-fights: which one wins is
+      // decided by GPU floating-point noise per pixel, not by rendering
+      // meaning, and the loser flickers through as a wrong-coloured scatter
+      // wherever the background shape happens to cross a letter's own
+      // stroke — measured on real output, exactly at one letter whose ink
+      // the background sheet passed behind. Smaller shapes nudged forward is
+      // the same fix the halo shells use for the identical problem, just
+      // never applied here (see `i * 0.02` below `buildHalo`).
+      const ordered = byColour
+        .map((group) => ({
+          group,
+          area: group.contours.reduce((sum, c) => sum + absArea(c.points), 0),
+        }))
+        .sort((a, b) => b.area - a.area);
+
+      ordered.forEach(({ group }, i) => {
         const geo = flat(group.contours);
         const mat = faceMaterial({
           colour: group.colour ?? box.faceColour,
           truth: truth.day, view: 'day', translucent: true,
         });
         const mesh = new THREE.Mesh(geo, mat);
-        mesh.position.set(origin.x, origin.y, boxZ + depth + SURFACE_EPS);
+        mesh.position.set(origin.x, origin.y, boxZ + depth + SURFACE_EPS * (1 + i * 0.02));
+        mesh.renderOrder = 1 + i;
         mesh.name = `CL-P-01 face (${group.colour ?? 'per logo'})`;
         g.add(mesh);
         disposables.push(geo, mat);
@@ -604,7 +624,7 @@ function buildBox(
           const t = view === 'day' ? truth.day : truth.night;
           setFaceLit(mat, group.colour ?? box.faceColour, !!t.faceEmissive && view === 'night');
         });
-      }
+      });
       return g;
     }
 
