@@ -33,6 +33,15 @@ export class DLJobBuilderService {
       );
     }
 
+    // Sign text is optional on the wizard's Logo step (only the file is
+    // required) — same as Channel Letters, where `ensureDesign()` falls back
+    // to 'Untitled Sign' at creation. DL has no draft row to bake that
+    // fallback into up front, so it happens here instead; without it, a blank
+    // logoText reaches DLJobFormSchema's `businessName: min(1)` as an empty
+    // string and the job fails deep inside the engine with a ZodError instead
+    // of a page the wizard could react to.
+    const businessName = dto.logoText.trim() || 'Untitled Sign';
+
     const wallUrl = await this.resolveWallUrl(dto);
     const wallBuffer = await this.storage.read(wallUrl);
     const wallMime = this.storage.mimeOf(wallUrl);
@@ -40,8 +49,8 @@ export class DLJobBuilderService {
 
     const designLike: DesignLike = {
       id: jobId,
-      name: dto.logoText,
-      logoText: dto.logoText,
+      name: businessName,
+      logoText: businessName,
       positionX: dto.box.xFrac + dto.box.widthFrac / 2,
       positionY: dto.box.yFrac + dto.box.heightFrac / 2,
       scale: dto.box.widthFrac,
@@ -71,12 +80,12 @@ export class DLJobBuilderService {
         ? { svg: logoBuffer.toString('utf8') }
         : { data: logoBuffer.toString('base64'), mime: logoMime },
     );
-    const placed = this.artwork.place(source, placement, { name: dto.logoText });
+    const placed = this.artwork.place(source, placement, { name: businessName });
 
     return {
       jobId,
       form: {
-        businessName: dto.logoText,
+        businessName,
         materialFamily: dto.materialFamily,
         finish: dto.finish,
         colour: dto.colour,
