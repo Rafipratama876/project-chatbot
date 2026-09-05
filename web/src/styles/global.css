@@ -369,6 +369,12 @@ a { color: inherit; }
 .status-READY { background: var(--green-50); color: var(--green-600); }
 .status-APPROVED { background: var(--navy-900); color: #fff; }
 
+/* Dimensional Letters proof statuses (dl-proof, not cl_design). */
+.status-QUEUED { background: #eef0f4; color: var(--muted); }
+.status-RUNNING { background: #fff4e0; color: #8a5a00; }
+.status-BLOCKED { background: #fff5f5; color: #b91c1c; }
+.status-FAILED { background: #fff5f5; color: #b91c1c; }
+
 /* ── Additions for the proof-engine wizard ─────────────────────────────── */
 
 .sidebar-note {

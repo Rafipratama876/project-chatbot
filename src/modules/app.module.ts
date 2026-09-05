@@ -21,6 +21,7 @@ import { StorageModule } from './storage/storage.module.js';
 import { UploadsModule } from './uploads/uploads.module.js';
 import { WallPresetsModule } from './wall-presets/wall-presets.module.js';
 import { DesignsModule } from './designs/designs.module.js';
+import { DLProofsModule } from './dl-proofs/dl-proofs.module.js';
 
 /**
  * Module graph:
@@ -62,6 +63,10 @@ import { DesignsModule } from './designs/designs.module.js';
     UploadsModule,
     WallPresetsModule,
     DesignsModule,
+    // Dimensional Letters — a second, independent pipeline (src/kb/engine/dl/,
+    // src/kb/output/dl-*.ts). Shares only the `Proof` output type and the
+    // three.js renderer; no CL-R rule is imported by anything under this.
+    DLProofsModule,
     HealthModule,
   ],
 })

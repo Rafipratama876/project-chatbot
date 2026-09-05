@@ -10,7 +10,7 @@
  */
 import * as THREE from 'three';
 import type { SignSpec, SignElement, Contour } from '../domain/spec.js';
-import { isBoxConstruction, returnColourOf, faceColourOf, faceRenderColour } from '../domain/spec.js';
+import { isBoxConstruction, returnColourOf, faceColourOf, faceRenderColour, depthOf } from '../domain/spec.js';
 import { TYPES, isContourBacker } from '../domain/taxonomy.js';
 import { buildRenderContract, type RenderContract, type ElementTruth } from './contract.js';
 import { extrude, flat, boxShape, contoursToShapes } from './shapes.js';
@@ -273,6 +273,13 @@ function buildLetters(
   // Flat cut letters and vinyl have no return.
   const isFlatCut = el.construction === 'CL-C-04' || el.construction === 'CL-C-05';
   const isVinyl = el.construction === 'CL-C-06';
+  // Dimensional Letters (compiled by src/kb/render/dl-compile.ts): unlike
+  // flat-cut channel-letter parts, a DL element's true depth is the point of
+  // the proof (cast metal, HDU, etc. run up to 2″+), so it is drawn at its
+  // real `returnDepth` rather than the flat-cut placeholder below. 'DL-C-01'
+  // is deliberately not a member of the `Construction` union — see the
+  // comment in dl-compile.ts — so this reads the raw string.
+  const isDimensionalLetter = (el.construction as string) === 'DL-C-01';
 
   if (isVinyl) {
     const geo = flat(el.contours);
@@ -285,7 +292,7 @@ function buildLetters(
     return g;
   }
 
-  const canDepth = isFlatCut ? 0.5 : depth;
+  const canDepth = isFlatCut ? 0.5 : isDimensionalLetter ? depthOf(el) : depth;
 
   // The can: one extrusion, exactly as it is fabricated.
   const canGeo = extrude(el.contours, { depth: canDepth });
@@ -306,7 +313,7 @@ function buildLetters(
     colour: faceRenderColour(el, 'day'),
     truth: truth.day,
     view: 'day',
-    translucent: type.translucentFace && !isFlatCut,
+    translucent: type.translucentFace && !isFlatCut && !isDimensionalLetter,
   });
   const face = new THREE.Mesh(faceGeo, faceMat);
   face.position.z = baseZ + canDepth + SURFACE_EPS;

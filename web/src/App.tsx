@@ -1,7 +1,10 @@
 import { NavLink, Route, Routes } from 'react-router-dom';
 import DesignsListPage from './pages/DesignsListPage';
+import ProductPickerPage from './pages/ProductPickerPage';
 import NewDesignWizardPage from './pages/NewDesignWizardPage';
+import NewDimensionalLetterWizardPage from './pages/NewDimensionalLetterWizardPage';
 import ReviewPage from './pages/ReviewPage';
+import DLReviewPage from './pages/DLReviewPage';
 
 export default function App() {
   return (
@@ -9,7 +12,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="brand">
           <span className="dot" />
-          Sign Pack — Channel Letters
+          Sign Pack
         </div>
         <NavLink to="/" end className={({ isActive }) => (isActive ? 'active' : '')}>
           My Designs
@@ -24,8 +27,13 @@ export default function App() {
       <main className="main">
         <Routes>
           <Route path="/" element={<DesignsListPage />} />
-          <Route path="/new" element={<NewDesignWizardPage />} />
+          {/* Product picker first — Channel Letters' own wizard is unmodified,
+              just reached one click later than it used to be reached directly. */}
+          <Route path="/new" element={<ProductPickerPage />} />
+          <Route path="/new/channel-letters" element={<NewDesignWizardPage />} />
+          <Route path="/new/dimensional-letters" element={<NewDimensionalLetterWizardPage />} />
           <Route path="/designs/:id" element={<ReviewPage />} />
+          <Route path="/dl-designs/:id" element={<DLReviewPage />} />
         </Routes>
       </main>
     </div>
