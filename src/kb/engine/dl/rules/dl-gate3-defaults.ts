@@ -8,7 +8,7 @@
 import type { DLRule } from '../dl-rule.js';
 import { DL_GATES } from '../dl-gates.js';
 import { Authority } from '../../precedence.js';
-import { DL_MATERIALS, DL_DEFAULT_FINISH, DL_MOUNT_FACTS } from '../../../domain/dl-taxonomy.js';
+import { DL_MATERIALS, DL_DEFAULT_FINISH, DL_MOUNT_FACTS, finishFromLabel } from '../../../domain/dl-taxonomy.js';
 import { formatInches } from '../../../domain/units.js';
 
 const DEFAULT_METAL_COLOUR = 'Natural / mill finish';
@@ -62,7 +62,15 @@ export const DL_DEF_03: DLRule = {
   id: 'DL-DEF-03', gate: DL_GATES.DEFAULTS, tier: 'SPEC', severity: 'AUTOFIX',
   kbRef: 'PDF p.9/10 (finish options)', title: 'Default finish for the material family',
   run(ctx) {
-    const value = ctx.spec.form.finish ?? DL_DEFAULT_FINISH[ctx.spec.materialFamily];
+    // The form carries the finish SELECT's label ("Mirror Polish (up to
+    // 24″)"), same as materialFamily/mountingMethod — resolve it to a DLFinish
+    // id rather than storing the label as if it were one; DL_FINISH_FACTS is
+    // keyed by id, and an unresolved label there is a crash, not a typo.
+    const requested = ctx.spec.form.finish ? finishFromLabel(ctx.spec.form.finish) : null;
+    if (ctx.spec.form.finish && !requested) {
+      ctx.note(`Finish "${ctx.spec.form.finish}" is not one of the known finishes — ignored.`, { severity: 'WARN' });
+    }
+    const value = requested ?? DL_DEFAULT_FINISH[ctx.spec.materialFamily];
     ctx.spec.elements.forEach((el, i) => {
       if (el.finish !== undefined) return;
       const path = `elements[${i}].finish`;

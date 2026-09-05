@@ -61,6 +61,19 @@ describe('Dimensional Letters engine', () => {
     expect(trace.entries.every((t) => !t.ruleId.startsWith('CL-'))).toBe(true);
   });
 
+  it('resolves the finish SELECT label (not id) to a DLFinish, same as materialFamily/mountingMethod', async () => {
+    const { spec } = await runDLEngine(baseJob({ materialFamily: 'Flat Cut Metal', finish: 'Mirror Polish (up to 24″)' }));
+    expect(spec.elements[0]!.finish).toBe('mirror-polish');
+  });
+
+  it('an unrecognised finish label defaults instead of crashing the output layer', async () => {
+    const { spec, trace } = await runDLEngine(baseJob({ finish: 'Not A Real Finish' }));
+    expect(spec.elements[0]!.finish).toBe('satin-brushed'); // cast-metal's default
+    expect(trace.entries.some((t) => t.message.includes('Not A Real Finish'))).toBe(true);
+    // The bug this guards: DL_FINISH_FACTS[el.finish].label must not throw.
+    expect(() => assembleDLProof(spec, trace, {})).not.toThrow();
+  });
+
   it('escalates an unresolved material family rather than guessing', async () => {
     const { spec } = await runDLEngine(baseJob({ materialFamily: 'Unobtainium' }));
     expect(spec.escalations.some((e) => e.ruleId === 'DL-IN-01')).toBe(true);

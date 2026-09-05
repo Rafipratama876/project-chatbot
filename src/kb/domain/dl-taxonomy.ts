@@ -167,6 +167,21 @@ export const DL_FINISH_FACTS: Record<DLFinish, DLFinishFacts> = {
   'powder-coat': { id: 'powder-coat', label: 'Powder Coat', appliesTo: ['cast-metal', 'flat-cut-metal'] },
 };
 
+/**
+ * Label → id, for a finish select that (like every other DL dropdown) sends
+ * the human label rather than the id. `resolveFormValue` from `taxonomy.js`
+ * does the case-insensitive match, same as `DL_FORM_MATERIAL_MAP`/
+ * `DL_FORM_MOUNT_MAP`.
+ */
+export const DL_FORM_FINISH_MAP: Record<string, DLFinish> = Object.fromEntries(
+  DL_FINISHES.map((id) => [DL_FINISH_FACTS[id].label, id]),
+);
+
+export function finishFromLabel(raw: string): DLFinish | null {
+  const norm = raw.trim().toLowerCase();
+  return DL_FINISHES.find((id) => DL_FINISH_FACTS[id].label.toLowerCase() === norm) ?? null;
+}
+
 export const DL_DEFAULT_FINISH: Record<DLMaterialFamily, DLFinish> = {
   'cast-metal': 'satin-brushed',
   'flat-cut-metal': 'satin-brushed',

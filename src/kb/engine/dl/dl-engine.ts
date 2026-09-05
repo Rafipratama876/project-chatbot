@@ -6,6 +6,7 @@
  */
 import type { DLJobInput, DLSpec } from '../../domain/dl-spec.js';
 import { DLJobInputSchema } from '../../domain/dl-spec.js';
+import { finishFromLabel } from '../../domain/dl-taxonomy.js';
 import { defaultThresholds, type ThresholdStore, type Threshold } from '../../domain/thresholds.js';
 import { DL_GATE_ORDER, DL_GATES, DL_MAX_VALIDATION_PASSES, type DLGateId } from './dl-gates.js';
 import { TraceLog } from '../trace.js';
@@ -106,11 +107,20 @@ function claimCustomerElementFields(job: DLJobInput, spec: DLSpec, precedence: P
   const f = job.form;
   spec.elements.forEach((el, i) => {
     const p = `elements[${i}]`;
+    // The finish field carries the SELECT's label ("Mirror Polish (up to
+    // 24″)"), same as materialFamily/mountingMethod resolved in dl-intake.ts —
+    // it has to become a DLFinish id before it touches `el.finish`, or
+    // DL_FINISH_FACTS[el.finish] throws in the output layer. An unresolved
+    // label is left unset here so DL-DEF-03 (Gate 3) applies the material's
+    // default and logs why, rather than the customer's typed value silently
+    // becoming a crash.
+    const finish = f.finish ? finishFromLabel(f.finish) : null;
+
     if (f.depth !== undefined) precedence.claim(`${p}.depth`, Authority.CUSTOMER, 'DL-IN-04', f.depth);
     if (f.colour) precedence.claim(`${p}.colour`, Authority.CUSTOMER, 'DL-IN-04', f.colour);
-    if (f.finish) precedence.claim(`${p}.finish`, Authority.CUSTOMER, 'DL-IN-04', f.finish);
+    if (finish) precedence.claim(`${p}.finish`, Authority.CUSTOMER, 'DL-IN-04', finish);
     if (f.depth !== undefined) el.depth = f.depth;
     if (f.colour) el.colour = f.colour;
-    if (f.finish) el.finish = f.finish as DLSpec['elements'][number]['finish'];
+    if (finish) el.finish = finish;
   });
 }
