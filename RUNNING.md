@@ -9,8 +9,9 @@ order, from a shell with no environment set, and produced the output shown.
 - **Docker** — Postgres with pgvector, and Redis
 - **Chromium for Playwright** — the renderer needs a real GL context
 
-No Anthropic key. The four LLM nodes are off by default and the engine runs all
-56 rules either way; the two judgment points escalate rather than guess.
+No OpenAI key needed to start. The four LLM nodes are off by default and the
+engine runs all 56 rules either way; the two judgment points escalate rather
+than guess.
 
 ## First run
 
@@ -116,24 +117,24 @@ Edit `.env`:
 
 ```
 LLM_ENABLED=true
-ANTHROPIC_API_KEY=sk-ant-…
+OPENAI_API_KEY=sk-…
 ```
 
-That wires four things and nothing else: §1.2 `Custom` and §7.1 `Other`
+Same key as image enhancement below — one OpenAI credential for the whole app.
+This wires four things and nothing else: §1.2 `Custom` and §7.1 `Other`
 resolution, the CL-R-54 logo-mark judgment, the §9.4 callout wording, and the
 revision loop. The renderer never calls a model.
 
-`ant auth login` works instead of a key — the SDK picks the profile up.
+`LLM_MODEL` defaults to `gpt-5.1`.
 
 ## Vector search
 
 `EMBEDDING_PROVIDER=none` is the default and is a supported configuration, not a
-broken one: Appendix A/B lookup falls back to Postgres full-text. Anthropic has
-no embeddings endpoint, so a provider is a separate credential:
+broken one: Appendix A/B lookup falls back to Postgres full-text. Embeddings
+use the same OpenAI credential as everything else:
 
 ```
-EMBEDDING_PROVIDER=voyage
-VOYAGE_API_KEY=…
+EMBEDDING_PROVIDER=openai
 ```
 
 Changing `EMBEDDING_DIMENSIONS` means re-running the migration — the vector

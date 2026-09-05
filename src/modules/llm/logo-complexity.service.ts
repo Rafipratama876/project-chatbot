@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
-import { AnthropicClient } from './anthropic.client.js';
+import { zodTextFormat } from 'openai/helpers/zod';
+import { OpenAIClient } from './openai.client.js';
 import type { SignElement } from '#/kb/domain/spec.js';
 import type { ThresholdStore } from '#/kb/domain/thresholds.js';
 import { measureStroke } from '#/kb/geometry/metrics.js';
@@ -30,7 +30,7 @@ export interface LogoJudgment { complex: boolean; confidence: number; reason: st
 
 @Injectable()
 export class LogoComplexityService {
-  constructor(private readonly anthropic: AnthropicClient) {}
+  constructor(private readonly openai: OpenAIClient) {}
 
   /**
    * Bound to a threshold store because the minimum stroke is one of the facts
@@ -38,7 +38,7 @@ export class LogoComplexityService {
    */
   forRun(thresholds: ThresholdStore, image?: { data: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' }) {
     return async (el: SignElement): Promise<LogoJudgment> => {
-      if (!this.anthropic.enabled) {
+      if (!this.openai.enabled) {
         return { complex: false, confidence: 0, reason: 'LLM nodes are disabled.' };
       }
 
@@ -58,26 +58,26 @@ export class LogoComplexityService {
         separateColours: el.colourBreaks ?? [],
       };
 
-      const content: Array<Record<string, unknown>> = [];
+      const content: Array<
+        { type: 'input_image'; image_url: string; detail: 'auto' }
+        | { type: 'input_text'; text: string }
+      > = [];
       if (image) {
         content.push({
-          type: 'image',
-          source: { type: 'base64', media_type: image.mediaType, data: image.data },
+          type: 'input_image',
+          image_url: `data:${image.mediaType};base64,${image.data}`,
+          detail: 'auto',
         });
       }
       content.push({
-        type: 'text',
+        type: 'input_text',
         text: `Measured facts for this mark:\n${JSON.stringify(facts, null, 2)}\n\nDecide the §3.5 step 1 question.`,
       });
 
-      const response = await this.anthropic.sdk.messages.parse({
-        model: this.anthropic.model,
-        max_tokens: 8000,
-        thinking: { type: 'adaptive' },
-        output_config: { effort: 'high', format: zodOutputFormat(JudgmentSchema) },
-        system: [{
-          type: 'text',
-          text: `${AnthropicClient.FRAMING}
+      const response = await this.openai.sdk.responses.parse({
+        model: this.openai.model,
+        reasoning: { effort: 'high' },
+        instructions: `${OpenAIClient.FRAMING}
 
 Question (KB §3.5 step 1, rule CL-R-54): does this logo mark have fine detail,
 enclosed counters, or colour breaks that cannot be built as separate fabricated
@@ -93,15 +93,14 @@ built as separate cans at this size. A mark whose narrowest stroke is at or
 above the minimum, with few or no enclosed counters and a single colour, is
 normally NOT complex.
 
-Return a confidence below ${this.anthropic.minConfidence} whenever the answer is
+Return a confidence below ${this.openai.minConfidence} whenever the answer is
 genuinely arguable. That routes the decision to a human, which is a correct
 outcome.`,
-          cache_control: { type: 'ephemeral' },
-        }],
-        messages: [{ role: 'user', content: content as never }],
+        input: [{ role: 'user', content }],
+        text: { format: zodTextFormat(JudgmentSchema, 'judgment') },
       });
 
-      const { value, refused, reason } = this.anthropic.unwrap(response);
+      const { value, refused, reason } = this.openai.unwrap(response);
       if (refused || !value) return { complex: false, confidence: 0, reason: reason ?? 'no parsed output' };
 
       return {

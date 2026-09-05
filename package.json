@@ -20,7 +20,6 @@
     "build:web": "cd web && npm install && npm run build"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.122.0",
     "@fastify/compress": "^8.3.0",
     "@fastify/multipart": "^10.1.1",
     "@fastify/static": "^10.1.3",

@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { AnthropicClient } from './anthropic.client.js';
+import { OpenAIClient } from './openai.client.js';
 import { FreeTextResolverService } from './free-text-resolver.service.js';
 import { LogoComplexityService } from './logo-complexity.service.js';
 import { CalloutWriterService } from './callout-writer.service.js';
@@ -20,14 +20,14 @@ import { RevisionPatchService } from './revision-patch.service.js';
 @Module({
   imports: [ConfigModule],
   providers: [
-    AnthropicClient,
+    OpenAIClient,
     FreeTextResolverService,
     LogoComplexityService,
     CalloutWriterService,
     RevisionPatchService,
   ],
   exports: [
-    AnthropicClient,
+    OpenAIClient,
     FreeTextResolverService,
     LogoComplexityService,
     CalloutWriterService,

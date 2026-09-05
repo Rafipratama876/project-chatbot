@@ -23,7 +23,7 @@ src/
 
 ## The one boundary that matters
 
-`src/kb/` never imports NestJS, TypeORM or the Anthropic SDK.
+`src/kb/` never imports NestJS, TypeORM or the OpenAI SDK.
 `test/architecture.spec.ts` fails the build if it ever does.
 
 That is not tidiness. The rule engine is the part that has to be deterministic
@@ -102,11 +102,11 @@ number a rule compares against.
 
 ### Embeddings
 
-Anthropic has no embeddings endpoint and recommends a third-party provider, so
-`EmbeddingService` is a separate credential and a separate call from the Claude
-client. `EMBEDDING_PROVIDER=none` is a supported configuration: vendor search
-falls back to Postgres full-text, which is worse at paraphrase and perfectly
-adequate for *"what depth coil does Gemini stock"*.
+`EmbeddingService` calls OpenAI's `text-embedding-3-small` — the same
+`OPENAI_API_KEY` as `OpenAIClient` and image enhancement, one provider for the
+whole app. `EMBEDDING_PROVIDER=none` is a supported configuration: vendor
+search falls back to Postgres full-text, which is worse at paraphrase and
+perfectly adequate for *"what depth coil does Gemini stock"*.
 
 ## Why thresholds are rows
 

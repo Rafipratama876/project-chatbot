@@ -2,7 +2,7 @@
  * The boundary that makes the rest of this work.
  *
  * `src/kb/` is the 56 rules, the geometry and the output contract. If it ever
- * imports NestJS, TypeORM or the Anthropic SDK, then "does CL-R-51 fire at 4
+ * imports NestJS, TypeORM or the OpenAI SDK, then "does CL-R-51 fire at 4
  * inches?" stops being answerable without booting an application, and the rule
  * engine stops being a thing you can reason about on its own. So it is a test,
  * not a convention.
@@ -24,7 +24,7 @@ function walk(dir: string): string[] {
 const FORBIDDEN = [
   { pattern: /from '@nestjs\//, why: 'the rule engine must not need a DI container' },
   { pattern: /from 'typeorm'/, why: 'the rule engine must not reach a database' },
-  { pattern: /from '@anthropic-ai\//, why: 'the rules are deterministic; judgment arrives through a port' },
+  { pattern: /from 'openai'/, why: 'the rules are deterministic; judgment arrives through a port' },
   { pattern: /from 'pg'/, why: 'the rule engine must not reach a database' },
   { pattern: /from '#\/modules\//, why: 'src/kb must not depend on the application layer' },
 ];

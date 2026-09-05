@@ -9,8 +9,8 @@
  */
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
-import { AnthropicClient } from './anthropic.client.js';
+import { zodTextFormat } from 'openai/helpers/zod';
+import { OpenAIClient } from './openai.client.js';
 import { WolfStudioFormSchema, type WolfStudioForm, type SignSpec } from '#/kb/domain/spec.js';
 
 /** Every field a revision is allowed to touch. Anything else escalates. */
@@ -42,26 +42,21 @@ export interface RevisionResult {
 
 @Injectable()
 export class RevisionPatchService {
-  constructor(private readonly anthropic: AnthropicClient) {}
+  constructor(private readonly openai: OpenAIClient) {}
 
   async toPatch(
     currentForm: WolfStudioForm,
     spec: SignSpec,
     request: string,
   ): Promise<RevisionResult> {
-  if (!this.anthropic.enabled) {
+  if (!this.openai.enabled) {
     return { form: currentForm, applied: [], unsupported: ['LLM nodes are disabled.'], confidence: 0 };
   }
 
-  const response = await this.anthropic.sdk.messages.parse({
-    model: this.anthropic.model,
-    max_tokens: 8000,
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'medium', format: zodOutputFormat(PatchSchema) },
-    system: [
-      {
-        type: 'text',
-        text: `${AnthropicClient.FRAMING}
+  const response = await this.openai.sdk.responses.parse({
+    model: this.openai.model,
+    reasoning: { effort: 'medium' },
+    instructions: `${OpenAIClient.FRAMING}
 
 Turn the customer's revision request into edits to the intake form. The rule
 engine then re-runs every gate over the edited form, so you do not need to work
@@ -75,17 +70,12 @@ Rules:
   means something else.
 - Depths and sizes are in inches, as numbers.
 - Quote the words that justify each edit.
-- Confidence below ${this.anthropic.minConfidence} sends the request to a human.`,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages: [{
-      role: 'user',
-      content: `Current form:\n${JSON.stringify(currentForm, null, 2)}\n\nCurrent sign: ${spec.type}, ${spec.elements.length} element(s): ${spec.elements.map((e) => `${e.id} "${e.content}" ${e.construction}`).join('; ')}\n\nRevision request:\n"""\n${request}\n"""`,
-    }],
+- Confidence below ${this.openai.minConfidence} sends the request to a human.`,
+    input: `Current form:\n${JSON.stringify(currentForm, null, 2)}\n\nCurrent sign: ${spec.type}, ${spec.elements.length} element(s): ${spec.elements.map((e) => `${e.id} "${e.content}" ${e.construction}`).join('; ')}\n\nRevision request:\n"""\n${request}\n"""`,
+    text: { format: zodTextFormat(PatchSchema, 'patch') },
   });
 
-  const { value, refused } = this.anthropic.unwrap(response);
+  const { value, refused } = this.openai.unwrap(response);
   if (refused || !value) {
     return { form: currentForm, applied: [], unsupported: ['Could not parse the revision request.'], confidence: 0 };
   }

@@ -16,8 +16,8 @@
  */
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
-import { AnthropicClient } from './anthropic.client.js';
+import { zodTextFormat } from 'openai/helpers/zod';
+import { OpenAIClient } from './openai.client.js';
 import { lintCallout } from '#/kb/domain/anatomy.js';
 import type { DisclosureBundle } from '#/kb/output/disclosures.js';
 import type { SignSpec } from '#/kb/domain/spec.js';
@@ -37,14 +37,14 @@ export interface WriteCalloutsOptions {
 
 @Injectable()
 export class CalloutWriterService {
-  constructor(private readonly anthropic: AnthropicClient) {}
+  constructor(private readonly openai: OpenAIClient) {}
 
   async rewrite(
     spec: SignSpec,
     bundle: DisclosureBundle,
     opts: WriteCalloutsOptions = {},
   ): Promise<DisclosureBundle> {
-  if (!this.anthropic.enabled) return bundle;
+  if (!this.openai.enabled) return bundle;
   const targets = [...bundle.criticals, ...bundle.autofixes];
   if (targets.length === 0) return bundle;
 
@@ -61,15 +61,10 @@ export class CalloutWriterService {
       : null,
   }));
 
-  const response = await this.anthropic.sdk.messages.parse({
-    model: this.anthropic.model,
-    max_tokens: 16000,
-    thinking: { type: 'adaptive' },
-    output_config: { effort: 'medium', format: zodOutputFormat(CalloutsSchema) },
-    system: [
-      {
-        type: 'text',
-        text: `${AnthropicClient.FRAMING}
+  const response = await this.openai.sdk.responses.parse({
+    model: this.openai.model,
+    reasoning: { effort: 'medium' },
+    instructions: `${OpenAIClient.FRAMING}
 
 Rewrite each engine message as one or two sentences a small-business owner would
 understand, addressed to them. This is a pre-sales proof, not a shop drawing.
@@ -89,16 +84,11 @@ Model answer for a construction substitution:
 letters, where the minimum is 8". We've shown it as an illuminated capsule with
 the copy reversed out, so it lights the same way the letters do at night and
 stays crisp at that size."`,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    messages: [{
-      role: 'user',
-      content: `Business: ${spec.businessName}\nSign type: ${spec.type}\n\nMessages to rewrite:\n${JSON.stringify(payload, null, 2)}`,
-    }],
+    input: `Business: ${spec.businessName}\nSign type: ${spec.type}\n\nMessages to rewrite:\n${JSON.stringify(payload, null, 2)}`,
+    text: { format: zodTextFormat(CalloutsSchema, 'callouts') },
   });
 
-  const { value, refused } = this.anthropic.unwrap(response);
+  const { value, refused } = this.openai.unwrap(response);
   if (refused || !value) return bundle;
 
   const enforce = opts.enforceVocabulary ?? true;

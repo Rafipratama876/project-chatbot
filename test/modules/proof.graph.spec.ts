@@ -11,7 +11,7 @@ import { EngineService } from '#/modules/engine/engine.service.js';
 import { RenderService } from '#/modules/render/render.service.js';
 import { CalloutWriterService } from '#/modules/llm/callout-writer.service.js';
 import { RevisionPatchService } from '#/modules/llm/revision-patch.service.js';
-import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
+import { OpenAIClient } from '#/modules/llm/openai.client.js';
 import { runEngine } from '#/kb/engine/engine.js';
 import { heavenCrepes } from '../fixtures/jobs.js';
 import type { JobInput } from '#/kb/domain/spec.js';
@@ -42,7 +42,7 @@ const build = async (overrides: {
       { provide: RenderService, useValue: { render } },
       { provide: CalloutWriterService, useValue: { rewrite: async (_s: unknown, b: unknown) => b } },
       { provide: RevisionPatchService, useValue: { toPatch: vi.fn() } },
-      { provide: AnthropicClient, useValue: { enabled: overrides.llmEnabled ?? false, minConfidence: 0.75 } },
+      { provide: OpenAIClient, useValue: { enabled: overrides.llmEnabled ?? false, minConfidence: 0.75 } },
       { provide: ConfigService, useValue: { get: () => '/tmp/proofs-test' } },
     ],
   }).compile();

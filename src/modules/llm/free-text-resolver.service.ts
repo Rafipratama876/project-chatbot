@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { z } from 'zod';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
-import { AnthropicClient } from './anthropic.client.js';
+import { zodTextFormat } from 'openai/helpers/zod';
+import { OpenAIClient } from './openai.client.js';
 import type { FreeTextRequest, FreeTextResolution } from '#/kb/engine/rule.js';
 
 /**
@@ -24,10 +24,10 @@ const ResolutionSchema = z.object({
 export class FreeTextResolverService {
   private readonly logger = new Logger(FreeTextResolverService.name);
 
-  constructor(private readonly anthropic: AnthropicClient) {}
+  constructor(private readonly openai: OpenAIClient) {}
 
   readonly resolve = async (req: FreeTextRequest): Promise<FreeTextResolution> => {
-    if (!this.anthropic.enabled) {
+    if (!this.openai.enabled) {
       return { value: null, confidence: 0, reason: 'LLM nodes are disabled.' };
     }
     if (!req.text.trim()) {
@@ -36,14 +36,10 @@ export class FreeTextResolverService {
 
     const options = req.allowed.map((id) => `  ${id} — ${req.labels[id] ?? id}`).join('\n');
 
-    const response = await this.anthropic.sdk.messages.parse({
-      model: this.anthropic.model,
-      max_tokens: 4000,
-      thinking: { type: 'adaptive' },
-      output_config: { effort: 'medium', format: zodOutputFormat(ResolutionSchema) },
-      system: [{
-        type: 'text',
-        text: `${AnthropicClient.FRAMING}
+    const response = await this.openai.sdk.responses.parse({
+      model: this.openai.model,
+      reasoning: { effort: 'medium' },
+      instructions: `${OpenAIClient.FRAMING}
 
 The customer selected a catch-all value for "${req.field}". Resolve it to exactly
 one of the options below, using only what the Additional Information field says.
@@ -57,12 +53,11 @@ Rules:
   these. Escalating to a human is the correct outcome, not a failure.
 - Quote the words you relied on in "evidence". If you cannot quote anything, the
   confidence is below 0.5.`,
-        cache_control: { type: 'ephemeral' },
-      }],
-      messages: [{ role: 'user', content: `Additional Information:\n"""\n${req.text}\n"""` }],
+      input: `Additional Information:\n"""\n${req.text}\n"""`,
+      text: { format: zodTextFormat(ResolutionSchema, 'resolution') },
     });
 
-    const { value, refused, reason } = this.anthropic.unwrap(response);
+    const { value, refused, reason } = this.openai.unwrap(response);
     if (refused || !value) return { value: null, confidence: 0, reason: reason ?? 'no parsed output' };
 
     // The closed set is enforced here, not trusted from the model. A returned

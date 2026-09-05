@@ -10,7 +10,7 @@ import { EngineService } from '#/modules/engine/engine.service.js';
 import { RenderService, type RenderedProofPanel } from '#/modules/render/render.service.js';
 import { CalloutWriterService } from '#/modules/llm/callout-writer.service.js';
 import { RevisionPatchService } from '#/modules/llm/revision-patch.service.js';
-import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
+import { OpenAIClient } from '#/modules/llm/openai.client.js';
 
 /**
  * Orchestration.
@@ -62,7 +62,7 @@ export class ProofGraph {
     private readonly render: RenderService,
     private readonly callouts: CalloutWriterService,
     private readonly revisions: RevisionPatchService,
-    private readonly anthropic: AnthropicClient,
+    private readonly openai: OpenAIClient,
   ) {}
 
   build(options: GraphRunOptions = {}) {
@@ -104,7 +104,7 @@ export class ProofGraph {
           unverifiedThresholds: s.unverified,
         });
 
-        if (this.anthropic.enabled && !s.spec.blocked) {
+        if (this.openai.enabled && !s.spec.blocked) {
           // Wording only. What gets disclosed was decided by the trace.
           const disclosures = await this.callouts.rewrite(s.spec, proof.disclosures);
           proof = { ...proof, disclosures };
@@ -117,7 +117,7 @@ export class ProofGraph {
 
       .addNode('revise', async (s) => {
         if (!s.revisionRequest || !s.spec) return { revisionRequest: null };
-        if (!this.anthropic.enabled) {
+        if (!this.openai.enabled) {
           return {
             revisionRequest: null,
             revisionLog: ['Revision requested but the LLM nodes are disabled.'],
@@ -127,7 +127,7 @@ export class ProofGraph {
         const patch = await this.revisions.toPatch(
           s.job.form as WolfStudioForm, s.spec, s.revisionRequest,
         );
-        if (patch.confidence < this.anthropic.minConfidence) {
+        if (patch.confidence < this.openai.minConfidence) {
           return {
             revisionRequest: null,
             revisionLog: [

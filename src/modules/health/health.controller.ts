@@ -4,7 +4,7 @@ import {
   HealthCheck, HealthCheckService, TypeOrmHealthIndicator, HealthIndicatorResult,
 } from '@nestjs/terminus';
 import { ThresholdService } from '#/modules/knowledge/threshold.service.js';
-import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
+import { OpenAIClient } from '#/modules/llm/openai.client.js';
 import { EmbeddingService } from '#/modules/knowledge/embedding.service.js';
 import { KB_RULE_IDS, implementedRuleIds } from '#/kb/engine/rules/index.js';
 
@@ -15,7 +15,7 @@ export class HealthController {
     private readonly health: HealthCheckService,
     private readonly db: TypeOrmHealthIndicator,
     private readonly thresholds: ThresholdService,
-    private readonly anthropic: AnthropicClient,
+    private readonly openai: OpenAIClient,
     private readonly embeddings: EmbeddingService,
   ) {}
 
@@ -54,7 +54,7 @@ export class HealthController {
     return {
       features: {
         status: 'up',
-        llmNodes: this.anthropic.enabled ? 'enabled' : 'disabled (judgments escalate)',
+        llmNodes: this.openai.enabled ? 'enabled' : 'disabled (judgments escalate)',
         embeddings: this.embeddings.enabled ? 'enabled' : 'disabled (vendor search uses full text)',
         unverifiedThresholds: this.thresholds.unverified().length,
       },

@@ -4,7 +4,7 @@ import type { EngineServices } from '#/kb/engine/rule.js';
 import type { JobInput } from '#/kb/domain/spec.js';
 import { placeholderConverter, type ColourConverter } from '#/kb/domain/materials.js';
 import { ThresholdService } from '#/modules/knowledge/threshold.service.js';
-import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
+import { OpenAIClient } from '#/modules/llm/openai.client.js';
 import { FreeTextResolverService } from '#/modules/llm/free-text-resolver.service.js';
 import { LogoComplexityService } from '#/modules/llm/logo-complexity.service.js';
 
@@ -31,18 +31,18 @@ export class EngineService {
 
   constructor(
     private readonly thresholds: ThresholdService,
-    private readonly anthropic: AnthropicClient,
+    private readonly openai: OpenAIClient,
     private readonly freeText: FreeTextResolverService,
     private readonly logoComplexity: LogoComplexityService,
   ) {}
 
   async run(job: JobInput, options: RunOptions = {}): Promise<EngineResult> {
     const store = this.thresholds.createStore(options.thresholdOverrides ?? {});
-    const useLlm = this.anthropic.enabled && !options.deterministicOnly;
+    const useLlm = this.openai.enabled && !options.deterministicOnly;
 
     const services: EngineServices = {
       colourConverter: options.colourConverter ?? placeholderConverter,
-      minConfidence: this.anthropic.minConfidence,
+      minConfidence: this.openai.minConfidence,
       ...(useLlm
         ? {
             resolveFreeText: this.freeText.resolve,

@@ -3,7 +3,7 @@ import { runDLEngine, type DLEngineResult } from '#/kb/engine/dl/dl-engine.js';
 import type { DLEngineServices } from '#/kb/engine/dl/dl-rule.js';
 import type { DLJobInput } from '#/kb/domain/dl-spec.js';
 import { placeholderConverter, type ColourConverter } from '#/kb/domain/materials.js';
-import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
+import { OpenAIClient } from '#/modules/llm/openai.client.js';
 import { FreeTextResolverService } from '#/modules/llm/free-text-resolver.service.js';
 
 export interface DLRunOptions {
@@ -14,7 +14,7 @@ export interface DLRunOptions {
 /**
  * Thin wrapper — the DL engine itself is a pure function in `src/kb/`, same
  * separation as `EngineService`/`runEngine`. Reuses `FreeTextResolverService`
- * / `AnthropicClient` (generic Nest LLM ports, no Channel Letters vocabulary
+ * / `OpenAIClient` (generic Nest LLM ports, no Channel Letters vocabulary
  * baked into either) for DL's own `Custom`/`Other` free-text resolution —
  * does not call `EngineService` and does not import `ALL_RULES`.
  */
@@ -23,16 +23,16 @@ export class DLEngineService {
   private readonly logger = new Logger(DLEngineService.name);
 
   constructor(
-    private readonly anthropic: AnthropicClient,
+    private readonly openai: OpenAIClient,
     private readonly freeText: FreeTextResolverService,
   ) {}
 
   async run(job: DLJobInput, options: DLRunOptions = {}): Promise<DLEngineResult> {
-    const useLlm = this.anthropic.enabled && !options.deterministicOnly;
+    const useLlm = this.openai.enabled && !options.deterministicOnly;
 
     const services: DLEngineServices = {
       colourConverter: options.colourConverter ?? placeholderConverter,
-      minConfidence: this.anthropic.minConfidence,
+      minConfidence: this.openai.minConfidence,
       ...(useLlm ? { resolveFreeText: this.freeText.resolve } : {}),
     };
 

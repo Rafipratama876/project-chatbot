@@ -8,7 +8,7 @@ import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { EngineService } from '#/modules/engine/engine.service.js';
 import { ThresholdService } from '#/modules/knowledge/threshold.service.js';
-import { AnthropicClient } from '#/modules/llm/anthropic.client.js';
+import { OpenAIClient } from '#/modules/llm/openai.client.js';
 import { FreeTextResolverService } from '#/modules/llm/free-text-resolver.service.js';
 import { LogoComplexityService } from '#/modules/llm/logo-complexity.service.js';
 import { MemoryThresholdStore } from '#/kb/domain/thresholds.js';
@@ -27,8 +27,8 @@ const makeModule = async (opts: { llmEnabled: boolean; logoComplex?: boolean }) 
       EngineService,
       { provide: ThresholdService, useValue: { createStore: () => new MemoryThresholdStore() } },
       {
-        provide: AnthropicClient,
-        useValue: { enabled: opts.llmEnabled, minConfidence: 0.75, model: 'claude-opus-5' },
+        provide: OpenAIClient,
+        useValue: { enabled: opts.llmEnabled, minConfidence: 0.75, model: 'gpt-5.1' },
       },
       { provide: FreeTextResolverService, useValue: { resolve: freeTextResolve } },
       { provide: LogoComplexityService, useValue: { forRun: () => logoJudge } },

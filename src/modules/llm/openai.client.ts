@@ -1,11 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 
 /**
- * The only Anthropic client in the application.
- *
- * Four nodes use it, and none of them is the renderer:
+ * The only text/vision model client in the application — paired with
+ * `EnhanceModule`'s own `OpenAI` client (image generation, `gpt-image-1`) as
+ * the other half of the single OpenAI "hole" this app calls out to. Four
+ * nodes use this one, and none of them is the renderer:
  *   1. §1.2 / §7.1 free-text resolution  → FreeTextResolverService
  *   2. CL-R-54 logo-mark judgment        → LogoComplexityService
  *   3. §9.4 customer-facing callouts     → CalloutWriterService
@@ -15,16 +16,16 @@ import Anthropic from '@anthropic-ai/sdk';
  * are deterministic and stay that way.
  */
 @Injectable()
-export class AnthropicClient {
-  private readonly logger = new Logger(AnthropicClient.name);
-  private client: Anthropic | null = null;
+export class OpenAIClient {
+  private readonly logger = new Logger(OpenAIClient.name);
+  private client: OpenAI | null = null;
 
   readonly model: string;
   readonly minConfidence: number;
   private readonly featureEnabled: boolean;
 
   constructor(private readonly config: ConfigService) {
-    this.model = config.get<string>('llm.model') ?? 'claude-opus-5';
+    this.model = config.get<string>('llm.model') ?? 'gpt-5.1';
     this.minConfidence = config.get<number>('llm.minConfidence') ?? 0.75;
     this.featureEnabled = config.get<boolean>('llm.enabled') ?? false;
   }
@@ -36,21 +37,21 @@ export class AnthropicClient {
    */
   get enabled(): boolean {
     if (!this.featureEnabled) return false;
-    return Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+    return Boolean(process.env.OPENAI_API_KEY);
   }
 
-  get sdk(): Anthropic {
+  get sdk(): OpenAI {
     if (!this.enabled) {
       throw new Error('LLM nodes are disabled — check `enabled` before calling.');
     }
-    // Resolves ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or an `ant auth login`
-    // profile. No key is hardcoded here.
-    this.client ??= new Anthropic();
+    // Same OPENAI_API_KEY the image-enhancement client reads — one credential
+    // for both halves of the app's one AI provider.
+    this.client ??= new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     return this.client;
   }
 
   /**
-   * Shared framing, cached as a system block.
+   * Shared framing, passed as `instructions` on every Responses API call.
    *
    * The KB is 53 KB and fits in context whole, so it is never chunked into a
    * vector store: a retrieval miss on a rule means the rule silently did not
@@ -67,20 +68,21 @@ export class AnthropicClient {
   ].join(' ');
 
   /**
-   * A safety refusal returns HTTP 200 with `stop_reason: "refusal"`, so it does
-   * not throw and would otherwise read as an empty answer.
+   * A safety refusal on the Responses API is a `refusal` content block inside
+   * an otherwise-200 response, not a thrown error — so it would otherwise read
+   * as an empty parsed answer.
    */
   unwrap<T>(response: {
-    stop_reason?: string | null;
-    stop_details?: unknown;
-    parsed_output?: T | null;
+    output_parsed?: T | null;
+    output?: Array<{ type: string; content?: Array<{ type: string; refusal?: string }> }>;
   }): { value: T | null; refused: boolean; reason?: string } {
-    if (response.stop_reason === 'refusal') {
-      const details = response.stop_details as { category?: string; explanation?: string } | null;
-      const reason = details?.explanation ?? details?.category ?? 'refusal';
-      this.logger.warn(`request refused: ${reason}`);
-      return { value: null, refused: true, reason };
+    const refusal = response.output
+      ?.flatMap((item) => item.content ?? [])
+      .find((c) => c.type === 'refusal');
+    if (refusal) {
+      this.logger.warn(`request refused: ${refusal.refusal ?? 'no explanation given'}`);
+      return { value: null, refused: true, reason: refusal.refusal };
     }
-    return { value: response.parsed_output ?? null, refused: false };
+    return { value: response.output_parsed ?? null, refused: false };
   }
 }
