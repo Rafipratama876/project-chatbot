@@ -62,7 +62,7 @@ export default function NewDimensionalLetterWizardPage() {
         box: wall.box,
         facadeRect: wall.facadeRect ?? undefined,
       });
-      navigate(`/dl-designs/${proof.id}`);
+      navigate(`/dl-designs/${proof.rootProofId}`);
     } catch (e) {
       // Stay on the step so the spec is still there to correct.
       setError(e instanceof Error ? e.message : String(e));

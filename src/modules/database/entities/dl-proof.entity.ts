@@ -75,9 +75,47 @@ export class DLProofEntity {
   @Column({ name: 'error_message', type: 'text', nullable: true })
   errorMessage!: string | null;
 
+  /**
+   * The first proof in this revision chain — itself, for a proof created
+   * fresh from the wizard. A revision points its `rootProofId` at its
+   * parent's, so the review page's URL and its chat thread (`dl_proof_message`,
+   * also keyed by `rootProofId`) stay put across versions, the same way a
+   * Channel Letters `design_id` does — without a separate draft table.
+   */
+  @Index()
+  @Column({ name: 'root_proof_id', type: 'uuid', nullable: true })
+  rootProofId!: string | null;
+
+  /** 1, 2, 3… within a revision chain. What the review page's version chips count. */
+  @Column({ type: 'integer', default: 1 })
+  version!: number;
+
+  @Column({ type: 'boolean', default: false })
+  approved!: boolean;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 
   @UpdateDateColumn({ name: 'updated_at', type: 'timestamptz' })
   updatedAt!: Date;
+}
+
+/** One turn of the DL revision conversation — the DL equivalent of `cl_design_message`. */
+@Entity('dl_proof_message')
+export class DLProofMessageEntity {
+  @PrimaryGeneratedColumn('uuid')
+  id!: string;
+
+  @Index()
+  @Column({ name: 'root_proof_id', type: 'uuid' })
+  rootProofId!: string;
+
+  @Column({ type: 'text' })
+  role!: 'USER' | 'AGENT';
+
+  @Column({ type: 'text' })
+  content!: string;
+
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
+  createdAt!: Date;
 }

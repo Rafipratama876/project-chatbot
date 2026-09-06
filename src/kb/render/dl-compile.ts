@@ -107,11 +107,49 @@ function faceMaterialToken(family: DLMaterialFamily): FaceMaterial {
   }
 }
 
+/**
+ * The default "let the material speak for itself" text — DL_DEF_02's
+ * "Natural / mill finish" — is fabricator language for "don't paint it", not
+ * a named colour. `resolveColour()` (kb/render/materials.ts) has no table
+ * entry for "natural" or "mill finish", and its fallback for anything
+ * unmatched is a generic light grey (#c8c8c8) — close enough to a light
+ * wall or stucco backdrop that the letters read as nearly the same tone as
+ * the background behind them. That is not a rendering nuance, it is a sign a
+ * customer can't read, so it gets a real metal/plastic tone here instead.
+ *
+ * Render-only, exactly like CL's §4.7 `renderColour`: `DLSpec.elements[].colour`
+ * — what the DL spec block's COLOUR column prints — is untouched and still
+ * reads "Natural / mill finish", the correct instruction for the fabricator.
+ */
+// A light brushed-silver hex (#b8bcc0) was the first attempt here and it was
+// still wrong: measured against a real rendered panel, its pixels landed
+// within a few RGB units of the wall behind it (light stucco/brick renders
+// at roughly 184-216 across R/G/B; #b8bcc0 is 184/188/192). The renderer's
+// `metalness`/specular highlights (kb/render/materials.ts, shared with CL —
+// not touched here) do most of the real-world contrast work for bare metal,
+// and this flat base colour is what is left once that's accounted for — so
+// it has to carry contrast on its own rather than merely look plausibly
+// "metal". A mid-graphite tone reads unmistakably as metal (not paint, not
+// black) while staying well clear of typical light building-wall tones.
+const NATURAL_METAL_RENDER_COLOUR = '#71767c'; // graphite / gunmetal aluminium
+const NATURAL_PLASTIC_RENDER_COLOUR = '#f2f2f2'; // matches resolveColour's own 'white'
+
+function dlRenderColourFor(colour: string, family: DLMaterialFamily): string {
+  const norm = colour.trim().toLowerCase();
+  const isDescriptive = norm === ''
+    || norm.includes('natural') || norm.includes('mill finish')
+    || norm.includes('unfinished') || norm.includes('unpainted') || norm.includes('raw');
+  if (!isDescriptive) return colour;
+  const metal = family === 'cast-metal' || family === 'flat-cut-metal';
+  return metal ? NATURAL_METAL_RENDER_COLOUR : NATURAL_PLASTIC_RENDER_COLOUR;
+}
+
 export function compileDLSpecToSignSpec(spec: DLSpec): SignSpec {
   const contract = buildDLRenderContract(spec);
 
   const elements: SignElement[] = spec.elements.map((el): SignElement => {
     const colour = dlColourOf(el);
+    const renderColour = dlRenderColourFor(colour, spec.materialFamily);
     return {
       id: el.id,
       role: 'CL-E-01',
@@ -127,8 +165,8 @@ export function compileDLSpecToSignSpec(spec: DLSpec): SignSpec {
       // Dimensional letters are one uniform material front-to-back, unlike a
       // channel letter's separate face/return colours — same value both sides
       // so the extrusion in scene.ts reads as one solid piece.
-      returnColour: colour,
-      face: { material: faceMaterialToken(spec.materialFamily), colour, renderColour: colour },
+      returnColour: renderColour,
+      face: { material: faceMaterialToken(spec.materialFamily), colour: renderColour, renderColour },
       trimCap: { kind: 'none' },
       back: 'none',
       lit: el.lit,

@@ -1,5 +1,5 @@
 import {
-  BadRequestException, Body, Controller, Get, Header, Param, Post, Res,
+  BadRequestException, Body, Controller, Get, Header, Param, Patch, Post, Res,
 } from '@nestjs/common';
 import type { FastifyReply } from 'fastify';
 import { createReadStream } from 'node:fs';
@@ -8,6 +8,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ZodError } from 'zod';
 import { DLProofsService } from './dl-proofs.service.js';
 import { DLJobBuilderService } from './dl-job-builder.service.js';
+import { DLExportService } from './dl-export.service.js';
 import { CreateDLProofDto } from './dto/create-dl-proof.dto.js';
 import { CreateDLProofFromWizardDto } from './dto/create-dl-proof-from-wizard.dto.js';
 import { DLProofResponseDto } from './dto/dl-proof-response.dto.js';
@@ -18,6 +19,7 @@ export class DLProofsController {
   constructor(
     private readonly proofs: DLProofsService,
     private readonly jobBuilder: DLJobBuilderService,
+    private readonly exports: DLExportService,
   ) {}
 
   @Post('wizard')
@@ -26,7 +28,8 @@ export class DLProofsController {
     description:
       'The DL equivalent of the Channel Letters wizard\'s "Generate Proof" — turns a logo '
       + 'file and a wall-image box into measured artwork and a placement, then runs the job '
-      + 'through the DL gates. No draft is persisted first (v1 has no dl_design table).',
+      + 'through the DL gates. No draft is persisted first (v1 has no dl_design table) — the '
+      + 'returned proof is its own revision chain root.',
   })
   async createFromWizard(@Body() body: CreateDLProofFromWizardDto): Promise<DLProofResponseDto> {
     const jobId = `dl-wizard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -88,6 +91,75 @@ export class DLProofsController {
   @Get('by-job/:jobId')
   async byJob(@Param('jobId') jobId: string): Promise<DLProofResponseDto[]> {
     return (await this.proofs.findByJob(jobId)).map(DLProofResponseDto.from);
+  }
+
+  @Post(':id/revise')
+  @ApiOperation({
+    summary: 'Apply a revision request directly to one proof.',
+    description:
+      'Patches the intake form and re-runs every DL gate as a new proof in the same '
+      + 'revision chain. The stored spec is never edited in place. For the chat-driven '
+      + 'flow the review page actually uses, see POST /dl-proofs/root/:rootId/chat.',
+  })
+  async revise(@Param('id') id: string, @Body() body: { request?: string }): Promise<DLProofResponseDto> {
+    if (!body?.request?.trim()) throw new BadRequestException('request is required');
+    return DLProofResponseDto.from(await this.proofs.revise(id, body.request));
+  }
+
+  @Patch(':id/approve')
+  async approve(@Param('id') id: string): Promise<DLProofResponseDto> {
+    return DLProofResponseDto.from(await this.proofs.approve(id));
+  }
+
+  // ── Revision chain (rootProofId) ────────────────────────────────────────
+
+  @Get('root/:rootId/latest')
+  @ApiOperation({ summary: 'The newest proof in a revision chain.' })
+  async latest(@Param('rootId') rootId: string): Promise<DLProofResponseDto> {
+    return DLProofResponseDto.from(await this.proofs.latestInSeries(rootId));
+  }
+
+  @Get('root/:rootId/versions')
+  @ApiOperation({ summary: 'Every proof in a revision chain, newest first.' })
+  async versions(@Param('rootId') rootId: string): Promise<DLProofResponseDto[]> {
+    return (await this.proofs.seriesOf(rootId)).map(DLProofResponseDto.from);
+  }
+
+  @Post('root/:rootId/regenerate')
+  @ApiOperation({ summary: 'Re-run the same job as a new version — "Render ulang", no form change.' })
+  async regenerate(@Param('rootId') rootId: string): Promise<DLProofResponseDto> {
+    return DLProofResponseDto.from(await this.proofs.regenerate(rootId));
+  }
+
+  @Get('root/:rootId/messages')
+  async messages(@Param('rootId') rootId: string) {
+    return (await this.proofs.messagesOf(rootId)).map((m) => ({
+      id: m.id, role: m.role, content: m.content, createdAt: m.createdAt,
+    }));
+  }
+
+  @Post('root/:rootId/chat')
+  @ApiOperation({
+    summary: 'The chat-driven revise the review page uses.',
+    description: 'Logs the message, revises the latest proof in the chain, logs the agent reply.',
+  })
+  async chat(@Param('rootId') rootId: string, @Body() body: { message?: string }) {
+    if (!body?.message?.trim()) throw new BadRequestException('message is required');
+    const result = await this.proofs.chat(rootId, body.message);
+    return {
+      agentMessage: {
+        id: result.agentMessage.id, role: result.agentMessage.role,
+        content: result.agentMessage.content, createdAt: result.agentMessage.createdAt,
+      },
+      proof: result.proof ? DLProofResponseDto.from(result.proof) : null,
+      specChanged: result.specChanged,
+    };
+  }
+
+  @Post('root/:rootId/export/pdf')
+  @ApiOperation({ summary: 'The proof sheet of the newest ready proof in a chain, as a PDF.' })
+  async exportPdf(@Param('rootId') rootId: string): Promise<{ url: string }> {
+    return { url: await this.exports.pdf(rootId) };
   }
 
   private parse(body: unknown) {

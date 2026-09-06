@@ -8,7 +8,7 @@
 import type { DLRule } from '../dl-rule.js';
 import { DL_GATES } from '../dl-gates.js';
 import { Authority } from '../../precedence.js';
-import { DL_MATERIALS, DL_DEFAULT_FINISH, DL_MOUNT_FACTS, finishFromLabel } from '../../../domain/dl-taxonomy.js';
+import { DL_MATERIALS, DL_DEFAULT_FINISH, DL_MOUNT_FACTS, DL_FINISH_FACTS, finishFromLabel } from '../../../domain/dl-taxonomy.js';
 import { formatInches } from '../../../domain/units.js';
 
 const DEFAULT_METAL_COLOUR = 'Natural / mill finish';
@@ -71,14 +71,15 @@ export const DL_DEF_03: DLRule = {
       ctx.note(`Finish "${ctx.spec.form.finish}" is not one of the known finishes — ignored.`, { severity: 'WARN' });
     }
     const value = requested ?? DL_DEFAULT_FINISH[ctx.spec.materialFamily];
+    const display = DL_FINISH_FACTS[value].label;
     ctx.spec.elements.forEach((el, i) => {
       if (el.finish !== undefined) return;
       const path = `elements[${i}].finish`;
       if (ctx.set(path, value, {
         authority: Authority.HOUSE,
-        message: `No finish specified — defaulted to "${value}".`,
+        message: `No finish specified — defaulted to "${display}".`,
       })) {
-        ctx.trace.pushDefault({ defaultId: 'DL-DEF-03', path, value, elementId: el.id, label: 'Finish', display: String(value) });
+        ctx.trace.pushDefault({ defaultId: 'DL-DEF-03', path, value, elementId: el.id, label: 'Finish', display });
       }
     });
   },

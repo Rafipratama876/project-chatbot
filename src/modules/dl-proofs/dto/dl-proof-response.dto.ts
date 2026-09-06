@@ -6,6 +6,11 @@ export class DLProofResponseDto {
   @ApiProperty() jobId!: string;
   @ApiProperty() status!: DLProofStatus;
   @ApiProperty() dlVersion!: string;
+  @ApiProperty({ description: 'The first proof in this revision chain — stable across revise/regenerate.' })
+  rootProofId!: string;
+  @ApiProperty({ description: '1, 2, 3… within the revision chain.' })
+  version!: number;
+  @ApiProperty() approved!: boolean;
   @ApiProperty({ description: 'One block per element.' })
   specBlock!: string | null;
   @ApiProperty({ description: 'Generated from the trace.' })
@@ -33,6 +38,9 @@ export class DLProofResponseDto {
       jobId: entity.jobId,
       status: entity.status,
       dlVersion: entity.dlVersion,
+      rootProofId: entity.rootProofId ?? entity.id,
+      version: entity.version,
+      approved: entity.approved,
       specBlock: entity.specBlock,
       disclosures: entity.disclosureText,
       panels: entity.panels,

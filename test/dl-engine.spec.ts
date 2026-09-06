@@ -39,6 +39,37 @@ function baseJob(overrides: Partial<DLJobInput['form']> = {}): DLJobInput {
   };
 }
 
+/** Same shape as baseJob's artwork, but the contour carries the mark's own colour. */
+function jobWithArtworkColour(colour: string): DLJobInput {
+  const job = baseJob();
+  job.artwork[0]!.colour = colour;
+  job.artwork[0]!.contours[0]!.colour = colour;
+  return job;
+}
+
+/** A two-colour mark: a text glyph and a graphic icon, each its own colour — the FRITJES case. */
+function jobWithTwoColours(): DLJobInput {
+  const job = baseJob({ businessName: 'Fritjes' });
+  job.artwork[0]!.text = 'FRITJES';
+  job.artwork[0]!.colour = '#242424';
+  job.artwork[0]!.contours[0]!.colour = '#242424';
+  job.artwork.push({
+    id: 'icon1',
+    kind: 'shape',
+    bbox: { x: 0, y: 14, w: 20, h: 20 },
+    capHeight: 20,
+    baselineY: 14,
+    narrowestStroke: 2,
+    colour: '#f9b82e',
+    contours: [{
+      points: [{ x: 0, y: 14 }, { x: 20, y: 14 }, { x: 20, y: 34 }, { x: 0, y: 34 }],
+      hole: false,
+      colour: '#f9b82e',
+    }],
+  });
+  return job;
+}
+
 describe('Dimensional Letters engine', () => {
   it('runs intake → composition → defaults → validation → render-contract without touching CL rules', async () => {
     const { spec, trace } = await runDLEngine(baseJob());
@@ -72,6 +103,76 @@ describe('Dimensional Letters engine', () => {
     expect(trace.entries.some((t) => t.message.includes('Not A Real Finish'))).toBe(true);
     // The bug this guards: DL_FINISH_FACTS[el.finish].label must not throw.
     expect(() => assembleDLProof(spec, trace, {})).not.toThrow();
+  });
+
+  it('renders the default "Natural / mill finish" colour with real contrast against a light wall, not just a different grey', async () => {
+    const { spec } = await runDLEngine(baseJob()); // cast-metal, no colour given
+    expect(spec.elements[0]!.colour).toBe('Natural / mill finish'); // the DL spec block still prints the honest fabricator text
+    const compiled = compileDLSpecToSignSpec(spec);
+    const returnColour = compiled.elements[0]!.returnColour!;
+
+    expect(returnColour).not.toBe('Natural / mill finish');
+    expect(compiled.elements[0]!.face.colour).toBe(returnColour);
+
+    // Measured off a real rendered panel (a light stucco/brick studio wall):
+    // its pixels land in the ~176-224 range on every channel. #c8c8c8 (the
+    // first bug) and #b8bcc0 (the first "fix", still wrong) both land inside
+    // that band. Luminance gap, not just a different hex, is the actual bar —
+    // a value can differ in hex and still be visually the same grey.
+    const luminance = (hex: string) => {
+      const n = parseInt(hex.replace('#', ''), 16);
+      const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const wallLuminance = luminance('#c8c8c8'); // representative light-wall tone
+    expect(Math.abs(luminance(returnColour) - wallLuminance)).toBeGreaterThan(40);
+  });
+
+  it('colours the element from the artwork itself, ahead of the material-family default', async () => {
+    const { spec, trace } = await runDLEngine(jobWithArtworkColour('#2b6cb0'));
+    expect(spec.elements[0]!.colour).toBe('#2b6cb0');
+    // Composition's own colour must pre-empt DL-DEF-02's "Natural / mill finish" —
+    // no DL-DEF-02 default entry should exist for colour on this element.
+    expect(trace.defaults.some((d) => d.defaultId === 'DL-DEF-02')).toBe(false);
+
+    const compiled = compileDLSpecToSignSpec(spec);
+    // A real colour (not descriptive "natural"/"mill finish" text) passes
+    // through dl-compile.ts's render-colour substitution unchanged.
+    expect(compiled.elements[0]!.returnColour).toBe('#2b6cb0');
+  });
+
+  it('an explicit customer colour still wins over the artwork\'s own colour', async () => {
+    const job = jobWithArtworkColour('#2b6cb0');
+    job.form.colour = 'Black';
+    const { spec } = await runDLEngine(job);
+    expect(spec.elements[0]!.colour).toBe('Black');
+  });
+
+  it('decomposes a multi-colour mark into one element per colour, instead of collapsing onto the first one', async () => {
+    const { spec, trace } = await runDLEngine(jobWithTwoColours());
+
+    expect(spec.elements).toHaveLength(2);
+    const text = spec.elements.find((e) => e.content === 'FRITJES');
+    const icon = spec.elements.find((e) => e.content !== 'FRITJES');
+    expect(text?.colour).toBe('#242424');
+    expect(icon?.colour).toBe('#f9b82e');
+    expect(icon?.content).toBe('Mark 2'); // no text on the icon item — labelled, not dropped
+
+    // Both still get a depth default independently (DL-DEF-01 already loops
+    // every element) — decomposition didn't have to touch that rule at all.
+    expect(text?.depth).toBeGreaterThan(0);
+    expect(icon?.depth).toBeGreaterThan(0);
+    expect(trace.entries.filter((t) => t.ruleId === 'DL-DEF-01')).toHaveLength(2);
+
+    const compiled = compileDLSpecToSignSpec(spec);
+    expect(compiled.elements).toHaveLength(2);
+    const colours = new Set(compiled.elements.map((e) => e.returnColour));
+    expect(colours).toEqual(new Set(['#242424', '#f9b82e']));
+  });
+
+  it('a single-colour mark still yields exactly one element (no behaviour change for the common case)', async () => {
+    const { spec } = await runDLEngine(jobWithArtworkColour('#1a1a1a'));
+    expect(spec.elements).toHaveLength(1);
   });
 
   it('escalates an unresolved material family rather than guessing', async () => {

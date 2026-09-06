@@ -13,7 +13,6 @@ import { dlSqFt, dlDepthOf, dlColourOf, dlFinishOf } from '../domain/dl-spec.js'
 import { DL_MATERIALS, DL_MOUNT_FACTS, DL_FINISH_FACTS } from '../domain/dl-taxonomy.js';
 import { formatInches } from '../domain/units.js';
 import type { DLDisclosureBundle } from './dl-disclosures.js';
-import { preferredPanel } from '../render/panelPlan.js';
 import type { ProofPanel } from './proof.js';
 
 export interface DLProofSheetInput {
@@ -40,8 +39,19 @@ const noteOf = (p: ProofPanel | undefined, fallback?: string): string | undefine
 export function renderDLProofSheet(input: DLProofSheetInput): string {
   const { spec, disclosures, panels, kbVersion } = input;
   const facts = DL_MATERIALS[spec.materialFamily];
-  const day = preferredPanel(panels, 'day');
-  const night = preferredPanel(panels, 'night');
+
+  // DL almost never has a night view — 7 of 8 material families are never
+  // illuminated (see dl-compile.ts's `truthForDL`), so CL's day-picks-
+  // elevation/night-picks-3/4 convention (`preferredPanel` in
+  // render/panelPlan.ts) would leave the second panel showing "not
+  // rendered" on every ordinary job. Both panels shown here are DAY unless
+  // the rare illuminated flat-cut-acrylic/PVC case actually produced a
+  // night render, in which case the 3/4 shows that instead — it is the one
+  // panel that would show the face glowing.
+  const elevation = panels.find((p) => p.view === 'day' && p.camera === 'front-elevation');
+  const threeQuarter = panels.find((p) => p.view === 'night' && p.camera === 'detail-perspective')
+    ?? panels.find((p) => p.view === 'day' && p.camera === 'detail-perspective');
+  const illuminatedAtNight = threeQuarter?.view === 'night';
   const onBuilding = !!spec.placement;
 
   const specRows: Array<[string, string]> = [
@@ -72,8 +82,8 @@ export function renderDLProofSheet(input: DLProofSheetInput): string {
   </header>
 
   <section class="views">
-    ${viewPanel('DAY VIEW', day, noteOf(day, onBuilding ? undefined : 'Shown on a neutral wall — no site photograph was supplied.'))}
-    ${viewPanel('NIGHT VIEW', night, noteOf(night, onBuilding ? undefined : 'Shown on a neutral wall — no site photograph was supplied.'))}
+    ${viewPanel('FRONT ELEVATION', elevation, noteOf(elevation, onBuilding ? undefined : 'Shown on a neutral wall — no site photograph was supplied.'))}
+    ${viewPanel(illuminatedAtNight ? '3/4 PERSPECTIVE — ILLUMINATED' : '3/4 PERSPECTIVE', threeQuarter, noteOf(threeQuarter, onBuilding ? undefined : 'Shown on a neutral wall — no site photograph was supplied.'))}
   </section>
 
   <section class="two">
