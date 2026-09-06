@@ -25,6 +25,10 @@ const COLOUR_TABLE: Array<[string, string]> = ([
   ['brushed chrome', '#b4b8bc'],
   ['metallic silver', '#b8bcc0'],
   ['brushed silver', '#a9adb2'],
+  ['mill aluminum', '#b3b6ba'],
+  ['mill aluminium', '#b3b6ba'],
+  ['aluminum', '#b3b6ba'],
+  ['aluminium', '#b3b6ba'],
   ['polished gold', '#c9a227'],
   ['brushed gold', '#b39344'],
   ['holiday green', '#0f7a3d'],
@@ -128,9 +132,11 @@ export const ENV_REFLECTANCE: Readonly<Record<string, number>> = {
   'CL-P-32 logo box': 1.0,
   'CL-P-21 pill box': 1.0,
   'CL-P-18 raceway': 0.9,
-  // A wall takes far less than the metal in front of it.
+  // A wall takes far less than the metal in front of it — the backer is the
+  // metal, so it now reflects like the return/raceway rather than like the
+  // wall it used to share a material function with.
   'CL-P-31 mounting surface': 0.3,
-  'CL-P-20 backer panel': 0.35,
+  'CL-P-20 backer panel': 0.85,
 };
 
 /**
@@ -404,5 +410,25 @@ export function surfaceMaterial(
     color: resolveColour(colour, '#9a9a92'),
     roughness: 0.9,
     metalness: 0.0,
+  });
+}
+
+/**
+ * CL-P-20 backer panel, rendered as solid mill aluminium rather than as a
+ * painted wall.
+ *
+ * The panel used to reuse `surfaceMaterial()` — the wall's own render/block
+ * bump map at `metalness: 0`, i.e. explicitly matte masonry. A backer is a
+ * fabricated aluminium pan, not a rendered wall behind one, so it gets the
+ * same brushed-metal recipe as `returnMaterial()` (rough enough to scatter,
+ * metallic enough to pick up the environment) and none of the wall relief.
+ * Flat and unlit-clean is the correct look for a mill-finish panel; the wall's
+ * pockmarks are wrong here even when the two happen to share a colour string.
+ */
+export function backerMaterial(colour: string): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    color: resolveColour(colour, '#b3b6ba'),
+    roughness: 0.42,
+    metalness: 0.6,
   });
 }

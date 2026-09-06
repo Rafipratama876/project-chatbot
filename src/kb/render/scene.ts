@@ -15,7 +15,7 @@ import { TYPES, isContourBacker } from '../domain/taxonomy.js';
 import { buildRenderContract, type RenderContract, type ElementTruth } from './contract.js';
 import { extrude, flat, boxShape, contoursToShapes } from './shapes.js';
 import {
-  faceMaterial, returnMaterial, trimCapMaterial, haloMaterial, surfaceMaterial, copyMaterial,
+  faceMaterial, returnMaterial, trimCapMaterial, haloMaterial, surfaceMaterial, backerMaterial, copyMaterial,
   applyReflections,
   resolveColour, setFaceLit, type View,
 } from './materials.js';
@@ -151,7 +151,15 @@ export function buildSignScene(
         )
       : new THREE.BoxGeometry(spec.backer.w, spec.backer.h, thickness);
 
-    const mat = surfaceMaterial(spec.backer.colour);
+    // Backer is a fabricated aluminium pan, not a rendered wall — see
+    // `backerMaterial()`. "match mounting surface" is a wall-relative default
+    // from CL-D-10 with nothing to say about metal, so it falls through to
+    // the material's own mill-aluminium default instead of tinting the panel
+    // wall-grey.
+    const backerColour = /match (mounting surface|building colour)/i.test(spec.backer.colour)
+      ? 'aluminum'
+      : spec.backer.colour;
+    const mat = backerMaterial(backerColour);
     const backer = new THREE.Mesh(geo, mat);
     backer.position.set(
       contour ? 0 : spec.overall.w / 2,
