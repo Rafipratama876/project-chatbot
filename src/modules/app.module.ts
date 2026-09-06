@@ -22,6 +22,7 @@ import { UploadsModule } from './uploads/uploads.module.js';
 import { WallPresetsModule } from './wall-presets/wall-presets.module.js';
 import { DesignsModule } from './designs/designs.module.js';
 import { DLProofsModule } from './dl-proofs/dl-proofs.module.js';
+import { SCProofsModule } from './sc-proofs/sc-proofs.module.js';
 
 /**
  * Module graph:
@@ -67,6 +68,11 @@ import { DLProofsModule } from './dl-proofs/dl-proofs.module.js';
     // src/kb/output/dl-*.ts). Shares only the `Proof` output type and the
     // three.js renderer; no CL-R rule is imported by anything under this.
     DLProofsModule,
+    // Sign Cabinets — a third, independent pipeline (src/kb/engine/sc/,
+    // src/kb/output/sc-*.ts). Shares only the `Proof` output type and the
+    // three.js renderer; no CL-R rule or DL rule is imported by anything
+    // under this.
+    SCProofsModule,
     HealthModule,
   ],
 })

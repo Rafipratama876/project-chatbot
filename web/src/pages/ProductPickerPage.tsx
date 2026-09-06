@@ -17,7 +17,7 @@ export default function ProductPickerPage() {
         <p>Pilih jenis produk. Masing-masing punya alur, material dan proof sendiri.</p>
       </div>
 
-      <div className="wall-grid" style={{ gridTemplateColumns: 'repeat(2, 1fr)' }}>
+      <div className="wall-grid" style={{ gridTemplateColumns: 'repeat(3, 1fr)' }}>
         <button
           type="button"
           className="wall-option"
@@ -41,6 +41,20 @@ export default function ProductPickerPage() {
           <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, padding: '0 2px 2px' }}>
             Cast metal, flat cut metal/acrylic/PVC, injection molded, formed plastic, foam, HDU.
             Jalur rule engine terpisah — tidak berbagi rule dengan Channel Letters.
+          </p>
+        </button>
+
+        <button
+          type="button"
+          className="wall-option"
+          style={{ textAlign: 'left', padding: 18, height: 'auto' }}
+          onClick={() => navigate('/new/sign-cabinets')}
+        >
+          <div className="label" style={{ fontSize: 16, marginBottom: 6 }}>Sign Cabinets</div>
+          <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0, padding: '0 2px 2px' }}>
+            Acrylic/polycarbonate, pan face, embossed pan face, panel + vinyl, cut-through,
+            push-through acrylic, flex-face. Jalur rule engine terpisah — return proof day/night
+            seperti Channel Letters.
           </p>
         </button>
       </div>

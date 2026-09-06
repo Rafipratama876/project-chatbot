@@ -3,8 +3,10 @@ import DesignsListPage from './pages/DesignsListPage';
 import ProductPickerPage from './pages/ProductPickerPage';
 import NewDesignWizardPage from './pages/NewDesignWizardPage';
 import NewDimensionalLetterWizardPage from './pages/NewDimensionalLetterWizardPage';
+import NewSignCabinetWizardPage from './pages/NewSignCabinetWizardPage';
 import ReviewPage from './pages/ReviewPage';
 import DLReviewPage from './pages/DLReviewPage';
+import SCReviewPage from './pages/SCReviewPage';
 
 export default function App() {
   return (
@@ -32,8 +34,10 @@ export default function App() {
           <Route path="/new" element={<ProductPickerPage />} />
           <Route path="/new/channel-letters" element={<NewDesignWizardPage />} />
           <Route path="/new/dimensional-letters" element={<NewDimensionalLetterWizardPage />} />
+          <Route path="/new/sign-cabinets" element={<NewSignCabinetWizardPage />} />
           <Route path="/designs/:id" element={<ReviewPage />} />
           <Route path="/dl-designs/:id" element={<DLReviewPage />} />
+          <Route path="/sc-designs/:id" element={<SCReviewPage />} />
         </Routes>
       </main>
     </div>

@@ -10,12 +10,14 @@ import { DesignReferenceEntity } from './entities/design-reference.entity.js';
 import { DesignEntity, DesignMessageEntity } from './entities/design.entity.js';
 import { WallPresetEntity } from './entities/wall-preset.entity.js';
 import { DLProofEntity, DLProofMessageEntity } from './entities/dl-proof.entity.js';
+import { SCProofEntity, SCProofMessageEntity } from './entities/sc-proof.entity.js';
 import { InitialSchema1735689600000 } from './migrations/1735689600000-InitialSchema.js';
 import { ProofSheet1735776000000 } from './migrations/1735776000000-ProofSheet.js';
 import { Designs1735862400000 } from './migrations/1735862400000-Designs.js';
 import { SignBoxHeight1735880000000 } from './migrations/1735880000000-SignBoxHeight.js';
 import { DimensionalLetters1736000000000 } from './migrations/1736000000000-DimensionalLetters.js';
 import { DimensionalLettersRevisions1736100000000 } from './migrations/1736100000000-DimensionalLettersRevisions.js';
+import { SignCabinets1736200000000 } from './migrations/1736200000000-SignCabinets.js';
 
 export const ENTITIES = [
   ThresholdEntity,
@@ -31,6 +33,11 @@ export const ENTITIES = [
   // is touched by it.
   DLProofEntity,
   DLProofMessageEntity,
+  // Sign Cabinets — its own table (sc_proof); see
+  // migrations/1736200000000-SignCabinets.ts. Nothing above this line is
+  // touched by it.
+  SCProofEntity,
+  SCProofMessageEntity,
 ];
 
 export const MIGRATIONS = [
@@ -40,6 +47,7 @@ export const MIGRATIONS = [
   SignBoxHeight1735880000000,
   DimensionalLetters1736000000000,
   DimensionalLettersRevisions1736100000000,
+  SignCabinets1736200000000,
 ];
 
 // The Nest app loads .env through ConfigModule, but the migration CLI never
