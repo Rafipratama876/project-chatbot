@@ -10,7 +10,7 @@
  */
 import * as THREE from 'three';
 import type { SignSpec, SignElement, Contour } from '../domain/spec.js';
-import { isBoxConstruction, returnColourOf, faceColourOf, faceRenderColour, depthOf } from '../domain/spec.js';
+import { isBoxConstruction, returnColourOf, faceColourOf, faceRenderColour, depthOf, SC_CABINET_CONSTRUCTION } from '../domain/spec.js';
 import { TYPES, isContourBacker } from '../domain/taxonomy.js';
 import { buildRenderContract, type RenderContract, type ElementTruth } from './contract.js';
 import { extrude, flat, boxShape, contoursToShapes } from './shapes.js';
@@ -220,9 +220,12 @@ export function buildSignScene(
     // building itself.
     const haloSurface = spec.backer.present ? spec.backer.colour : spec.mountingSurface.colour;
 
-    const group = isBoxConstruction(el.construction)
-      ? buildBox(el, truth, spec, mountPlaneZ, haloSurface, haloClip, viewDependent, disposables)
-      : buildLetters(el, truth, spec, mountPlaneZ, haloSurface, haloClip, viewDependent, disposables);
+    // A registered construction is built by its own strategy and nothing
+    // else — see `ELEMENT_BUILDERS` below. Anything unregistered (every real
+    // Channel Letters construction) falls through to `buildDefaultElement`,
+    // completely unaware anything else was ever considered.
+    const build = ELEMENT_BUILDERS[el.construction as unknown as string] ?? buildDefaultElement;
+    const group = build(el, truth, spec, mountPlaneZ, haloSurface, haloClip, viewDependent, disposables);
     group.name = `${el.id} · ${el.role} · ${el.construction}`;
     signGroup.add(group);
   }
@@ -672,3 +675,121 @@ function buildBox(
 
   return g;
 }
+
+/**
+ * Sign Cabinets' own box builder — `SC_CABINET_CONSTRUCTION` only, dispatched
+ * to before `buildBox` is ever consulted (see the elements loop above).
+ * Forked from `buildBox` rather than sharing its body: a future change to
+ * Channel Letters' pill/logo/push-through box rendering (logo-silhouette
+ * cutting, per-colour face splitting, the reversed-out/push-through copy
+ * treatments) cannot move a cabinet, and a change here cannot move a
+ * Channel Letters box.
+ *
+ * Deliberately simpler than `buildBox`: a cabinet is always a plain
+ * (optionally rounded-corner) rectangle — never a logo silhouette, never
+ * split per colour, and `sc-compile.ts` always compiles it with the day/night
+ * truth `contract.ts`'s own SC branch computes directly (see
+ * `SC_CABINET_CONSTRUCTION` there), so this reads `truth.day`/`truth.night`
+ * as given rather than re-deriving field/copy colour from a copy-treatment
+ * lookup the way `buildBox` does for Channel Letters' box constructions.
+ */
+function buildSCCabinet(
+  el: SignElement,
+  truth: ElementTruth,
+  mountPlaneZ: number,
+  viewDependent: Array<(view: View) => void>,
+  disposables: Array<{ dispose(): void }>,
+): THREE.Group {
+  const g = new THREE.Group();
+  const box = el.box!;
+  const depth = truth.returnDepth;
+  const shape = boxShape(box.w, box.h, box.cornerRadius);
+  const origin = {
+    x: el.bbox.x + el.bbox.w / 2 - box.w / 2,
+    y: el.bbox.y + el.capHeight / 2 - box.h / 2,
+  };
+
+  const canGeo = new THREE.ExtrudeGeometry([shape], { depth, bevelEnabled: false, curveSegments: 24 });
+  const canMat = returnMaterial(box.returnColour, truth.day, 'day');
+  const can = new THREE.Mesh(canGeo, canMat);
+  can.position.set(origin.x, origin.y, mountPlaneZ);
+  can.castShadow = true;
+  can.name = 'SC-P-21 cabinet box';
+  g.add(can);
+  disposables.push(canGeo, canMat);
+
+  const faceGeo = new THREE.ShapeGeometry([shape]);
+  const faceMat = faceMaterial({ colour: box.faceColour, truth: truth.day, view: 'day', translucent: true });
+  const face = new THREE.Mesh(faceGeo, faceMat);
+  face.position.set(origin.x, origin.y, mountPlaneZ + depth + SURFACE_EPS);
+  face.name = 'CL-P-01 face'; // shared substring convention — proof/test code looks for "face" by name, not by exact construction
+  g.add(face);
+  disposables.push(faceGeo, faceMat);
+
+  const copyColour = el.face.renderColour ?? faceColourOf(el);
+  const copyGeo = flat(el.contours);
+  const copyMat = copyMaterial(copyColour);
+  const copy = new THREE.Mesh(copyGeo, copyMat);
+  copy.position.z = mountPlaneZ + depth + SURFACE_EPS * 2;
+  copy.name = 'SC-P-34 cabinet graphic';
+  g.add(copy);
+  disposables.push(copyGeo, copyMat);
+
+  viewDependent.push((view) => {
+    const t = view === 'day' ? truth.day : truth.night;
+    const fieldGlow = !!t.fieldEmissive && view === 'night';
+    const copyGlow = !!t.copyEmissive && view === 'night';
+
+    setFaceLit(faceMat, box.faceColour, fieldGlow);
+    copyMat.emissive = copyGlow ? resolveColour(copyColour) : new THREE.Color(0x000000);
+    copyMat.emissiveIntensity = copyGlow ? 1 : 0;
+    copyMat.toneMapped = !copyGlow;
+    copyMat.needsUpdate = true;
+  });
+
+  return g;
+}
+
+// ── Per-construction render strategy ────────────────────────────────────────
+//
+// A lookup table, not a class hierarchy — this file's own idiom (plain
+// functions, nothing behind an interface) applied to element building. A
+// construction registered in `ELEMENT_BUILDERS` is built by its own function
+// and NOTHING else: `buildDefaultElement` (Channel Letters' own
+// `isBoxConstruction`/`buildBox`/`buildLetters` dispatch) never runs for it.
+// Adding a 5th product's own construction is one new entry here — never a
+// branch that has to land in the right place among the others, which is
+// exactly the ordering mistake that would silently re-couple two products
+// that were deliberately kept apart.
+
+type ElementBuilder = (
+  el: SignElement,
+  truth: ElementTruth,
+  spec: SignSpec,
+  mountPlaneZ: number,
+  haloSurface: string,
+  haloClip: HaloClip | null,
+  viewDependent: Array<(view: View) => void>,
+  disposables: Array<{ dispose(): void }>,
+) => THREE.Group;
+
+/** Channel Letters' own default — every real `CL-C-*` construction, unregistered on purpose. */
+function buildDefaultElement(
+  el: SignElement, truth: ElementTruth, spec: SignSpec, mountPlaneZ: number,
+  haloSurface: string, haloClip: HaloClip | null,
+  viewDependent: Array<(view: View) => void>, disposables: Array<{ dispose(): void }>,
+): THREE.Group {
+  return isBoxConstruction(el.construction)
+    ? buildBox(el, truth, spec, mountPlaneZ, haloSurface, haloClip, viewDependent, disposables)
+    : buildLetters(el, truth, spec, mountPlaneZ, haloSurface, haloClip, viewDependent, disposables);
+}
+
+const ELEMENT_BUILDERS: Partial<Record<string, ElementBuilder>> = {
+  // Sign Cabinets — `buildSCCabinet` takes a narrower argument list (no
+  // `spec`/`haloSurface`/`haloClip`: a cabinet has no halo and its geometry
+  // needs nothing else off `spec`), so it is adapted to the common
+  // `ElementBuilder` shape here rather than widening its own signature to
+  // match CL's, which would hand it CL-only concepts it has no use for.
+  [SC_CABINET_CONSTRUCTION as unknown as string]: (el, truth, _spec, mountPlaneZ, _haloSurface, _haloClip, viewDependent, disposables) =>
+    buildSCCabinet(el, truth, mountPlaneZ, viewDependent, disposables),
+};

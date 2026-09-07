@@ -131,6 +131,14 @@ export const ENV_REFLECTANCE: Readonly<Record<string, number>> = {
   'CL-P-03 trim cap': 0.8,
   'CL-P-32 logo box': 1.0,
   'CL-P-21 pill box': 1.0,
+  // Sign Cabinets' own entry — deliberately its own key, not a reuse of
+  // 'CL-P-21 pill box' (see `SC_CABINET_CONSTRUCTION` in domain/spec.ts).
+  // Lower than a channel letter return: the PDF's cabinet sides are commonly
+  // a painted/powder-coated extrusion (§4), which reads less mirror-like
+  // than the often mill-finish aluminium of a channel letter return or pill
+  // box. Tuning this can never move Channel Letters' own pill box, and vice
+  // versa.
+  'SC-P-21 cabinet box': 0.8,
   'CL-P-18 raceway': 0.9,
   // A wall takes far less than the metal in front of it — the backer is the
   // metal, so it now reflects like the return/raceway rather than like the

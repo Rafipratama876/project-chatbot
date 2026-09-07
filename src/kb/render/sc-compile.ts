@@ -5,25 +5,30 @@
  * rule ever runs against one, and the CL rule engine (`runEngine`,
  * `ALL_RULES`) and the DL engine (`runDLEngine`) are never invoked here.
  *
- * Unlike `dl-compile.ts`, this does NOT need a private, cast construction
- * token: `construction: 'CL-C-02'` (Pill box) is a real, existing member of
- * `taxonomy.ts`'s `Construction` union, and `isBoxConstruction`'s facts —
- * a rectangular illuminated box, dark by day, glowing by night — are exactly
- * right for a sign cabinet. `copyTreatment: 'CL-CT-03'` ("Translucent vinyl
- * copy on a white face": `fieldGlows: true, copyGlows: true`) is the day/night
- * truth the PDF's own day/night mockups show — the whole face, background and
- * graphic together, dark by day and glowing by night. Reusing these two
- * existing taxonomy values as render tokens is the same trick `dl-compile.ts`
- * documents for `type: 'CL-T-04'`: they are read only for their render facts,
- * by `contract.ts`'s generic `truthFor`/`isBoxConstruction` switch and by
- * `scene.ts` — never by a `CL-R-*` rule, and never by Channel Letters' own
- * output layer (`specBlock.ts`/`proofSheet.ts`), which SC never calls.
+ * `construction: SC_CABINET_CONSTRUCTION` ('SC-C-01') is Sign Cabinets' own
+ * token — cast rather than added to `taxonomy.ts`'s pinned 7-member
+ * `Construction` union, the same device `dl-compile.ts` uses for `DL-C-01`.
+ * Unlike DL's token, this one is NOT recognised by `isBoxConstruction`
+ * (domain/spec.ts): `scene.ts` dispatches `=== SC_CABINET_CONSTRUCTION` to
+ * its own `buildSCCabinet` and `contract.ts`'s `truthFor` returns its own
+ * hardcoded day/night truth, both ahead of (never inside) the shared
+ * Channel Letters box-construction branches. The visual result is the box
+ * the PDF's day/night mockups show — whole face and graphic dark and solid
+ * by day, glowing together at night — but the code path, the mesh name
+ * ('SC-P-21 cabinet box', not Channel Letters' 'CL-P-21 pill box') and the
+ * `ENV_REFLECTANCE` entry in `materials.ts` are entirely SC's own: a future
+ * change to Channel Letters' pill/logo/push-through box rendering, or to its
+ * `CL-CT-03` copy-treatment table, cannot move a cabinet, and vice versa.
+ * Neither token is ever read by a `CL-R-*` rule, and neither reaches Channel
+ * Letters' own output layer (`specBlock.ts`/`proofSheet.ts`), which SC never
+ * calls.
  *
  * `type: 'CL-T-04'` (Non-Lit) is reused as-is, unlike the construction — it IS
  * a real, existing `SignType`, and `rearIlluminated: false` is exactly right:
  * a cabinet's face glows, but there is no separate halo behind it.
  */
 import type { SignSpec, SignElement, WolfStudioForm } from '../domain/spec.js';
+import { SC_CABINET_CONSTRUCTION } from '../domain/spec.js';
 import type { RenderContract } from './contract.js';
 import type { SCSpec } from '../domain/sc-spec.js';
 import { scDepthOf, scFaceColourOf } from '../domain/sc-spec.js';
@@ -54,12 +59,11 @@ export function compileSCSpecToSignSpec(spec: SCSpec): SignSpec {
     ? Math.min(spec.cabinet.cornerRadius ?? 6, Math.min(w, h) / 2)
     : 0;
 
-  // A pill box (CL-C-02) is drawn from `el.box` — a generated rectangle in
-  // local coordinates — not from `contours` (`buildBox` in scene.ts only
-  // reads contours for CL-C-03's logo-silhouette cut). `contours` below is
-  // still populated with a plain rectangle: harmless, and keeps the field a
-  // real outline rather than an empty placeholder for anything downstream
-  // that measures it (bbox-derived fields already carry the real geometry).
+  // `buildSCCabinet` draws the box from `el.box` — a generated rectangle in
+  // local coordinates — not from `contours`. `contours` below is still
+  // populated with a plain rectangle: harmless, and keeps the field a real
+  // outline rather than an empty placeholder for anything downstream that
+  // measures it (bbox-derived fields already carry the real geometry).
   const rectPoints: Pt[] = [
     { x: spec.cabinet.bbox.x, y: spec.cabinet.bbox.y },
     { x: spec.cabinet.bbox.x + w, y: spec.cabinet.bbox.y },
@@ -72,8 +76,10 @@ export function compileSCSpecToSignSpec(spec: SCSpec): SignSpec {
     role: 'CL-E-01',
     content: spec.businessName,
     itemIds: spec.artwork.map((a) => a.id),
-    construction: 'CL-C-02', // Pill box — real taxonomy value, reused for its render facts only.
-    copyTreatment: 'CL-CT-03', // Whole face + graphic glow together at night, dark by day.
+    construction: SC_CABINET_CONSTRUCTION, // SC's own box token — see module comment.
+    // No `copyTreatment` — SC's day/night truth is hardcoded in `contract.ts`'s
+    // own `SC_CABINET_CONSTRUCTION` branch, never looked up from a copy-treatment
+    // table, so there is nothing for this field to select.
     bbox: spec.cabinet.bbox,
     baselineY: spec.cabinet.bbox.y + spec.cabinet.bbox.h,
     capHeight: spec.cabinet.bbox.h,
@@ -104,11 +110,11 @@ export function compileSCSpecToSignSpec(spec: SCSpec): SignSpec {
   };
 
   // `renderContract` is left unset deliberately — unlike DL, SC's day/night
-  // truth is entirely carried by the reused `CL-C-02`/`CL-CT-03` tokens, so
-  // the shared `buildRenderContract(spec)` (called by `RenderService` when
-  // `spec.renderContract` is absent) produces the right contract on its own,
-  // through the same `isBoxConstruction` branch a Channel Letters pill-box
-  // job already exercises. Nothing SC-specific needs to run before render.
+  // truth is entirely carried by `SC_CABINET_CONSTRUCTION`'s own branch in
+  // `contract.ts`'s `truthFor`, so the shared `buildRenderContract(spec)`
+  // (called by `RenderService` when `spec.renderContract` is absent)
+  // produces the right contract on its own. Nothing SC-specific needs to run
+  // before render.
   const contract: RenderContract | undefined = undefined;
 
   return {

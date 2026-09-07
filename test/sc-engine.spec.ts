@@ -12,8 +12,10 @@ import type { SCJobInput } from '#/kb/domain/sc-spec.js';
  * end to end (its own intake, defaults, validation, render-contract) without
  * touching `runEngine`/`ALL_RULES` or `runDLEngine`/`DL_ALL_RULES`, and that
  * it compiles into a `SignSpec` the shared renderer draws correctly using
- * the existing `CL-C-02`/`CL-CT-03` box render path — no new branch in
- * `scene.ts`/`contract.ts`.
+ * the box-construction render path (`isBoxConstruction`/`buildBox`) under
+ * its own `SC_CABINET_CONSTRUCTION` token — the box geometry and day/night
+ * truth are shared with Channel Letters' pill box, but the mesh name and
+ * `ENV_REFLECTANCE` entry are SC's own, never Channel Letters'.
  */
 function baseJob(overrides: Partial<SCJobInput['form']> = {}): SCJobInput {
   return {
@@ -76,19 +78,23 @@ describe('Sign Cabinets engine', () => {
     expect(notIlluminable.spec.views).toEqual(['day']);
   });
 
-  it('compiles to a SignSpec using the existing CL-C-02/CL-CT-03 box render path, no new construction', async () => {
+  it('compiles to a SignSpec using its own SC_CABINET_CONSTRUCTION token and its own contract.ts truth branch', async () => {
     const { spec } = await runSCEngine(baseJob({ illuminated: true }));
     const compiled = compileSCSpecToSignSpec(spec);
 
     expect(compiled.elements).toHaveLength(1);
     const el = compiled.elements[0]!;
-    expect(el.construction).toBe('CL-C-02');
-    expect(el.copyTreatment).toBe('CL-CT-03');
+    // SC's own construction token — see `SC_CABINET_CONSTRUCTION` in
+    // domain/spec.ts — not Channel Letters' actual 'CL-C-02' pill box.
+    // No `copyTreatment` either: SC's truth is hardcoded in contract.ts's
+    // own branch, never looked up from a copy-treatment table.
+    expect(el.construction).toBe('SC-C-01');
+    expect(el.copyTreatment).toBeUndefined();
     expect(el.lit).toBe(true);
     expect(el.returnDepth).toBe(7);
 
-    // The shared, unmodified render contract builder must accept it cleanly —
-    // proves SC needs no new branch in contract.ts's `truthFor`.
+    // `buildRenderContract` must still accept it cleanly through its own
+    // dedicated SC branch (ahead of, not inside, `isBoxConstruction`).
     const contract = buildRenderContract(compiled);
     expect(contract.views).toEqual(['day', 'night']);
     const violations = verifyContract(compiled, contract);
@@ -130,9 +136,11 @@ describe('Sign Cabinets engine', () => {
     sign.setView('night');
     expect((face().material as THREE.MeshStandardMaterial).emissiveIntensity ?? 0).toBeGreaterThan(0);
 
+    // Its own mesh name, not Channel Letters' 'CL-P-21 pill box' — proves the
+    // box geometry AND its identity (for ENV_REFLECTANCE) are SC's own.
     let can: THREE.Mesh | undefined;
     sign.scene.traverse((o) => {
-      if ((o as THREE.Mesh).isMesh && (o.name === 'CL-P-21 pill box' || o.name === 'CL-P-02 return')) can = o as THREE.Mesh;
+      if ((o as THREE.Mesh).isMesh && o.name === 'SC-P-21 cabinet box') can = o as THREE.Mesh;
     });
     expect(can).toBeDefined();
     can!.geometry.computeBoundingBox();
@@ -148,5 +156,40 @@ describe('Sign Cabinets engine', () => {
     // Unresolved face material escalates (needs a human) rather than blocking
     // outright — same posture as DL-IN-01 for an unresolved material family.
     expect(spec.escalations.length).toBeGreaterThan(0);
+  });
+
+  it('reflects the environment on its own mesh, at its own value — never Channel Letters\' pill-box reflectance', async () => {
+    const { ENV_REFLECTANCE } = await import('#/kb/render/materials.js');
+    expect(ENV_REFLECTANCE['SC-P-21 cabinet box']).toBeDefined();
+    // Its own key, its own value — tuning one can never move the other.
+    expect(ENV_REFLECTANCE['SC-P-21 cabinet box']).not.toBe(ENV_REFLECTANCE['CL-P-21 pill box']);
+
+    const { spec } = await runSCEngine(baseJob());
+    const compiled = compileSCSpecToSignSpec(spec);
+    compiled.renderContract = buildRenderContract(compiled);
+
+    const fakeEnvironment = new THREE.Texture(); // stands in for browser-entry.ts's buildEnvironment(renderer)
+    const sign = buildSignScene(compiled, 'studio', undefined, fakeEnvironment);
+    sign.setView('day');
+
+    let can: THREE.Mesh | undefined;
+    sign.scene.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh && o.name === 'SC-P-21 cabinet box') can = o as THREE.Mesh;
+    });
+    expect(can).toBeDefined();
+    const mat = can!.material as THREE.MeshStandardMaterial;
+    expect(mat.envMap).toBe(fakeEnvironment);
+    expect(mat.envMapIntensity).toBeCloseTo(ENV_REFLECTANCE['SC-P-21 cabinet box']!, 5);
+
+    sign.dispose();
+  });
+
+  it('is invisible to isBoxConstruction — a future Channel Letters change to that predicate, or to buildBox, cannot reach a cabinet', async () => {
+    const { isBoxConstruction, SC_CABINET_CONSTRUCTION } = await import('#/kb/domain/spec.js');
+    expect(isBoxConstruction(SC_CABINET_CONSTRUCTION)).toBe(false);
+    // The 3 real Channel Letters box constructions are unaffected either way.
+    expect(isBoxConstruction('CL-C-02')).toBe(true);
+    expect(isBoxConstruction('CL-C-03')).toBe(true);
+    expect(isBoxConstruction('CL-C-07')).toBe(true);
   });
 });

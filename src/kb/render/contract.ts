@@ -11,7 +11,7 @@
 import type { SignSpec, SignElement } from '../domain/spec.js';
 import type { Construction, CopyTreatment } from '../domain/taxonomy.js';
 import { TYPES, COPY_TREATMENT_FACTS } from '../domain/taxonomy.js';
-import { isBoxConstruction, depthOf } from '../domain/spec.js';
+import { isBoxConstruction, depthOf, SC_CABINET_CONSTRUCTION } from '../domain/spec.js';
 
 export type View = 'day' | 'night';
 
@@ -66,7 +66,32 @@ const NONE: SurfaceTruth = {
   backgroundEmissive: false, castsShadow: true,
 };
 
+/**
+ * Sign Cabinets' own day/night truth — a strategy in the same spirit as
+ * `scene.ts`'s `ELEMENT_BUILDERS` registry, kept as one named function
+ * (rather than forced into a `Record<Construction, …>` table) because it is
+ * the only truth strategy that needs nothing from `spec`: its signature
+ * cannot read `TYPES[spec.type]` or `taxonomy.ts`'s `COPY_TREATMENT_FACTS`
+ * even by accident, which is a stronger guarantee than a shared function
+ * merely choosing not to. Hardcoded rather than looked up: a cabinet's face
+ * and its graphic always glow together (PDF's day/night mockups — the whole
+ * face, not a copy/field split), so there is no table for it to read. Every
+ * real Channel Letters construction below is unaware this function exists.
+ */
+function truthForSCCabinet(): { day: SurfaceTruth; night: SurfaceTruth; source: string } {
+  return {
+    day: { ...NONE, faceOpaque: true },
+    night: { ...NONE, faceOpaque: false, fieldEmissive: true, copyEmissive: true, faceEmissive: true },
+    source: 'Sign Cabinet: face and graphic glow together at night, dark and solid by day (own truth — not Channel Letters\' box copy-treatment table).',
+  };
+}
+
 function truthFor(spec: SignSpec, el: SignElement): { day: SurfaceTruth; night: SurfaceTruth; source: string } {
+  // Checked ahead of everything below (which stays Channel Letters' own
+  // CL-C-01/03/`isBoxConstruction` dispatch) so a future change to any of it
+  // can never move a cabinet, and vice versa.
+  if (el.construction === SC_CABINET_CONSTRUCTION) return truthForSCCabinet();
+
   const t = TYPES[spec.type];
 
   if (el.construction === 'CL-C-01') {

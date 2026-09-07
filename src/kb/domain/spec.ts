@@ -319,6 +319,27 @@ export interface SignSpec {
 
 // ── Derived helpers, used by rules and by the renderer ─────────────────────
 
+/**
+ * Sign Cabinets' own construction token — not a real member of
+ * `taxonomy.ts`'s `CONSTRUCTIONS` (`test/coverage.spec.ts` pins that union at
+ * exactly the 7 constructions KB v2.2 transcribes), so it is cast rather than
+ * added to it, the same device `dl-compile.ts` uses for `DL-C-01`.
+ *
+ * Deliberately NOT a member of `isBoxConstruction` below: `scene.ts`
+ * dispatches on `=== SC_CABINET_CONSTRUCTION` to its own `buildSCCabinet`
+ * before `isBoxConstruction` is ever consulted, and `contract.ts`'s
+ * `truthFor` does the same before its own `isBoxConstruction` branch — so
+ * this predicate, and every real Channel Letters box construction that
+ * depends on its meaning (`CL-C-02`/`CL-C-03`/`CL-C-07`), never has to
+ * account for a Sign Cabinet at all. A Sign Cabinet gets its own render
+ * identity end to end (its own build function, its own day/night truth, its
+ * own mesh name, its own `ENV_REFLECTANCE` entry in `materials.ts`) rather
+ * than a value threaded through Channel Letters' own box-construction path.
+ * No `CL-R-*` rule ever reads or produces this token; `sc-compile.ts` is the
+ * only place it is written.
+ */
+export const SC_CABINET_CONSTRUCTION = 'SC-C-01' as unknown as Construction;
+
 export const isBoxConstruction = (c: Construction): boolean =>
   c === 'CL-C-02' || c === 'CL-C-03' || c === 'CL-C-07';
 
