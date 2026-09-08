@@ -63,7 +63,12 @@ export class DLProofGraph {
         if (options.skipRender || !s.spec || s.spec.blocked) return { panels: [] };
         try {
           const compiled = compileDLSpecToSignSpec(s.spec);
-          const panels = await this.render.render(compiled, path.join(baseDir, `dl-${s.spec.jobId}`));
+          // No DL review page or DTO ever shows a `camera === 'concept'`
+          // panel — see RenderService.render()'s own `conceptScene` option
+          // doc-comment.
+          const panels = await this.render.render(
+            compiled, path.join(baseDir, `dl-${s.spec.jobId}`), { conceptScene: false },
+          );
           return { panels };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);

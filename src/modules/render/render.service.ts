@@ -68,7 +68,22 @@ export class RenderService implements OnModuleDestroy {
     this.browser = null;
   }
 
-  async render(spec: SignSpec, outDir: string): Promise<RenderedProofPanel[]> {
+  async render(
+    spec: SignSpec,
+    outDir: string,
+    /**
+     * `conceptScene`: on by default — Channel Letters' own review page is the
+     * only place one is ever shown (`conceptImageUrl` in
+     * `modules/designs/dto.ts`), and every existing caller of `render()`
+     * that doesn't pass this option keeps generating it exactly as before.
+     * Dimensional Letters and Sign Cabinets pass `false` explicitly from
+     * their own graphs: neither review page nor DTO ever surfaces a
+     * `camera === 'concept'` panel (DL: none at all; SC: filters it out on
+     * purpose), so paying its own ~30-40s generative pass on every one of
+     * their jobs bought nothing anyone ever saw.
+     */
+    options: { conceptScene?: boolean } = {},
+  ): Promise<RenderedProofPanel[]> {
     // §9.2 is checked before a pixel is drawn. Rendering a spec that violates
     // its own contract produces a convincing picture of the wrong sign.
     const contract = spec.renderContract ?? buildRenderContract(spec);
@@ -195,11 +210,12 @@ export class RenderService implements OnModuleDestroy {
       // review pages' own `pickPanel`s), never by position in this array.
       const out: RenderedProofPanel[] = [...layeredResults, ...independentResults];
 
-      // An illustrative concept scene, when one is switched on. Deliberately
-      // added after the contract check below has nothing to say about it: it
-      // is not a proof panel, carries no dimensions, and never appears on the
-      // sheet a customer signs.
-      if (this.enhance.enabled) {
+      // An illustrative concept scene, when one is switched on AND the caller
+      // actually wants one — see this method's own `conceptScene` option
+      // doc-comment. Deliberately added after the contract check below has
+      // nothing to say about it: it is not a proof panel, carries no
+      // dimensions, and never appears on the sheet a customer signs.
+      if (this.enhance.enabled && (options.conceptScene ?? true)) {
         const scene = await this.conceptScene(page, spec, outDir);
         if (scene) out.push(scene);
       }

@@ -64,7 +64,12 @@ export class SCProofGraph {
         if (options.skipRender || !s.spec || s.spec.blocked) return { panels: [] };
         try {
           const compiled = compileSCSpecToSignSpec(s.spec);
-          const panels = await this.render.render(compiled, path.join(baseDir, `sc-${s.spec.jobId}`));
+          // No SC review page or DTO ever shows a `camera === 'concept'`
+          // panel (SCReviewPage filters it out on purpose) — see
+          // RenderService.render()'s own `conceptScene` option doc-comment.
+          const panels = await this.render.render(
+            compiled, path.join(baseDir, `sc-${s.spec.jobId}`), { conceptScene: false },
+          );
           return { panels };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
