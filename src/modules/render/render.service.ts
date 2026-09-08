@@ -126,6 +126,24 @@ export class RenderService implements OnModuleDestroy {
           dataUrl: p.dataUrl, note: p.note ?? null, enhanced: null,
         };
 
+        // 'perspective' is rendered for completeness but is not a panel any
+        // reviewer is ever shown: `preferredPanel` (kb/render/panelPlan.ts)
+        // and every review page/proof sheet's own copy of it always prefer
+        // 'front-elevation' (day) or 'detail-perspective' (night), falling
+        // back to 'perspective' only if the preferred camera is entirely
+        // absent from the proof — something `panelsFor` (kb/render/views.ts)
+        // never lets happen, since it always requests all three cameras for
+        // a required view. Confirmed by grep: no other file in this
+        // codebase selects camera === 'perspective'. Spending a ~60s
+        // generative pass — the dominant cost of a layered night panel, or
+        // real OpenAI cost either way — on an image nothing ever displays
+        // is pure waste, so it is skipped here and only its deterministic
+        // render is kept, exactly like a panel enhance already skips for
+        // (rate limited, too little editable area, enhance disabled): the
+        // fallback to the plain render (`panel.enhanced?.file ?? panel.file`
+        // in every DTO that serves one) is not a new code path.
+        if (p.camera === 'perspective') return panel;
+
         if (isLayeredNightPanel(p)) {
           const outcome = await this.layeredNight(page, spec, p.camera, outDir, p.view);
           if (outcome) panel.enhanced = outcome;
