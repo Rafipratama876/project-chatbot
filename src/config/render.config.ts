@@ -10,4 +10,19 @@ export default registerAs('render', () => ({
    */
   keepBrowserWarm: process.env.RENDER_KEEP_WARM !== 'false',
   headlessArgs: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+  /**
+   * How many of a proof's panels can have their generative enhance pass
+   * (`EnhanceService.enhance`) in flight at once — see `mapWithConcurrency`.
+   * Only ever applies to panels that don't need the shared Playwright page
+   * (every day panel; night panels too, when `ENHANCE_NIGHT_MODE` is not
+   * `layered`) — a layered night panel still renders its own layers through
+   * that one page and stays one-at-a-time, unconditionally.
+   *
+   * 2, not higher: this project's own test runs have hit OpenAI's image-edit
+   * rate limit ("enhancement skipped: rate limited") well before saturating
+   * it — the number of independent calls at once, not the total per job,
+   * is what trips it. Raise it only against an account whose actual limit is
+   * known to clear it.
+   */
+  panelEnhanceConcurrency: Number(process.env.RENDER_PANEL_ENHANCE_CONCURRENCY ?? 2),
 }));

@@ -9,6 +9,7 @@ import type { SignSpec } from '#/kb/domain/spec.js';
 import type { RenderedPanel } from '#/kb/render/browser-entry.js';
 import { verifyContract, buildRenderContract } from '#/kb/render/contract.js';
 import { EnhanceService } from '#/modules/enhance/enhance.service.js';
+import { mapWithConcurrency } from './concurrency.js';
 
 export interface RenderedProofPanel {
   label: string;
@@ -97,8 +98,25 @@ export class RenderService implements OnModuleDestroy {
       )) as RenderedPanel[];
 
       await fs.mkdir(outDir, { recursive: true });
-      const out: RenderedProofPanel[] = [];
-      for (const p of panels) {
+
+      // The layered night path renders its own layers through THIS page
+      // (`this.layeredNight` below calls `page.evaluate` again) — one
+      // Playwright page is one WebGL context, so two of those can never run
+      // at once against it. Every other panel — every day panel, and a night
+      // panel too when `ENHANCE_NIGHT_MODE` is not `layered` — never touches
+      // the page again after the batch render above: writing its file and
+      // asking `EnhanceService.enhance` to redraw its ground is plain
+      // Buffer/network work with nothing shared to race on, so those can run
+      // several at once. Partitioned once here rather than decided inline
+      // per panel so which panels are safe to overlap is one visible list,
+      // not a fact buried in a shared `for` loop.
+      const isLayeredNightPanel = (p: RenderedPanel): boolean =>
+        this.enhance.enabled
+        && this.enhance.nightMode === 'layered'
+        && p.view === 'night'
+        && !(p.protection?.onPhotograph ?? false);
+
+      const buildPanel = async (p: RenderedPanel): Promise<RenderedProofPanel> => {
         const file = path.join(outDir, `${spec.jobId}-${p.view}-${p.camera}.png`);
         const base = Buffer.from(p.dataUrl.split(',')[1]!, 'base64');
         await fs.writeFile(file, base);
@@ -108,16 +126,7 @@ export class RenderService implements OnModuleDestroy {
           dataUrl: p.dataUrl, note: p.note ?? null, enhanced: null,
         };
 
-        // The layered night path: the wall goes to the model, the sign never
-        // does, and the two are added back together here. Chosen per panel
-        // rather than per job — the day panel is a composite on the customer's
-        // own photograph and has no rendered wall to replace.
-        const layered = this.enhance.enabled
-          && this.enhance.nightMode === 'layered'
-          && p.view === 'night'
-          && !(p.protection?.onPhotograph ?? false);
-
-        if (layered) {
+        if (isLayeredNightPanel(p)) {
           const outcome = await this.layeredNight(page, spec, p.camera, outDir, p.view);
           if (outcome) panel.enhanced = outcome;
         } else if (this.enhance.enabled) {
@@ -148,8 +157,25 @@ export class RenderService implements OnModuleDestroy {
           }
         }
 
-        out.push(panel);
-      }
+        return panel;
+      };
+
+      const layeredNightPanels = panels.filter(isLayeredNightPanel);
+      const independentPanels = panels.filter((p) => !isLayeredNightPanel(p));
+
+      // Page-bound panels, exactly as before: one at a time.
+      const layeredResults: RenderedProofPanel[] = [];
+      for (const p of layeredNightPanels) layeredResults.push(await buildPanel(p));
+
+      // Everything else, bounded — see `mapWithConcurrency`'s own comment for
+      // why bounded and why a plain helper rather than RxJS.
+      const concurrency = this.config.get<number>('render.panelEnhanceConcurrency') ?? 2;
+      const independentResults = await mapWithConcurrency(independentPanels, concurrency, buildPanel);
+
+      // Order doesn't matter downstream: every consumer looks a panel up by
+      // its `view`/`camera` (`preferredPanel` in kb/render/panelPlan.ts, the
+      // review pages' own `pickPanel`s), never by position in this array.
+      const out: RenderedProofPanel[] = [...layeredResults, ...independentResults];
 
       // An illustrative concept scene, when one is switched on. Deliberately
       // added after the contract check below has nothing to say about it: it
