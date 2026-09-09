@@ -1,22 +1,32 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { InjectQueue } from '@nestjs/bullmq';
 import { Repository } from 'typeorm';
+import type { Queue } from 'bullmq';
 import { SCProofEntity, SCProofMessageEntity } from '#/modules/database/entities/sc-proof.entity.js';
 import { SCProofGraph, type SCGraphRunOptions } from '#/modules/sc-graph/sc-proof.graph.js';
 import { SCRevisionPatchService } from './sc-revision-patch.service.js';
 import type { SCJobInput } from '#/kb/domain/sc-spec.js';
 import { SC_VERSION } from '#/kb/domain/sc-boilerplate.js';
+import { SC_PROOF_QUEUE, type SCProofJobData } from '#/modules/queues/sc-proof.queue.js';
 
 /**
  * Persistence for Sign Cabinet proofs — the SC equivalent of
  * `ProofsService`/`DLProofsService`, against `sc_proof` rather than
- * `cl_proof`/`dl_proof`. No BullMQ queue: SC jobs run synchronously, same as
- * DL, which is enough for the wizard's submit-and-wait flow.
+ * `cl_proof`/`dl_proof`.
  *
  * The revision loop mirrors DL's: `revise` is the low-level, proof-to-proof
  * operation (patch the form, re-run every gate, new row); `chat` is the
  * conversational layer (logs the exchange and resolves "the current proof"
  * from `rootProofId`).
+ *
+ * `enqueue()` is what the wizard, `revise` and `regenerate` all actually use
+ * — the SC equivalent of `DesignsService.render()`'s own reserve-then-queue
+ * shape. `create()` is left as the synchronous, blocking implementation
+ * (Gate 1→6 AND the render AND any enhance call, all before returning) — it
+ * still exists deliberately, as what the raw, lower-level `POST /sc-proofs`
+ * endpoint uses, the same way CL's own `/proofs` defaults to synchronous.
+ * Nothing customer-facing calls `create()` any more.
  */
 @Injectable()
 export class SCProofsService {
@@ -27,6 +37,7 @@ export class SCProofsService {
     @InjectRepository(SCProofMessageEntity) private readonly messages: Repository<SCProofMessageEntity>,
     private readonly graph: SCProofGraph,
     private readonly revisions: SCRevisionPatchService,
+    @InjectQueue(SC_PROOF_QUEUE) private readonly queue: Queue<SCProofJobData>,
   ) {}
 
   async create(
@@ -36,6 +47,26 @@ export class SCProofsService {
   ): Promise<SCProofEntity> {
     const record = await this.reserve(job, lineage);
     return this.runInto(record.id, job, options);
+  }
+
+  /**
+   * Reserves the row and hands the actual gates+render+enhance work to
+   * `SCProofProcessor`, returning the moment the row exists — the id the
+   * caller polls from, not a finished proof. `SCReviewPage` already derives
+   * `inFlight` from `status` and already polls every 2s while it is
+   * `queued`/`running`, so nothing on the frontend had to change for this.
+   */
+  async enqueue(
+    job: SCJobInput,
+    options: SCGraphRunOptions = {},
+    lineage?: { rootProofId: string; version: number },
+  ): Promise<SCProofEntity> {
+    const reserved = await this.reserve(job, lineage);
+    await this.queue.add('render', {
+      proofId: reserved.id, job,
+      skipRender: options.skipRender, deterministicOnly: options.deterministicOnly,
+    }, { jobId: reserved.id });
+    return reserved;
   }
 
   async reserve(
@@ -100,7 +131,8 @@ export class SCProofsService {
    * The low-level revision: patch the FORM, re-run every gate, a new row.
    * The stored spec is never edited in place — a spec changed outside the
    * gates has not been validated by them, same reasoning as CL's/DL's own
-   * `revise`.
+   * `revise`. Enqueued, not awaited to completion — the chat "send message"
+   * action that calls this (via `chat()` below) must not block on a render.
    */
   async revise(id: string, request: string): Promise<SCProofEntity> {
     const previous = await this.findOne(id);
@@ -116,19 +148,19 @@ export class SCProofsService {
     const rootProofId = previous.rootProofId ?? previous.id;
     const version = await this.nextVersion(rootProofId);
     const jobId = `${previous.jobId}-r${version}`;
-    return this.create(
+    return this.enqueue(
       { ...previous.job, jobId, form: patch.form },
       {},
       { rootProofId, version },
     );
   }
 
-  /** Re-runs the exact same job as a new version — "Render ulang", no form change. */
+  /** Re-runs the exact same job as a new version — "Render ulang", no form change. Enqueued, same reasoning as `revise`. */
   async regenerate(rootProofId: string): Promise<SCProofEntity> {
     const latest = await this.latestInSeries(rootProofId);
     const version = await this.nextVersion(rootProofId);
     const jobId = `${latest.jobId}-re${version}`;
-    return this.create({ ...latest.job, jobId }, {}, { rootProofId, version });
+    return this.enqueue({ ...latest.job, jobId }, {}, { rootProofId, version });
   }
 
   async approve(id: string): Promise<SCProofEntity> {
@@ -183,9 +215,12 @@ export class SCProofsService {
       };
     }
 
-    const summary = revised.blocked
-      ? 'Applied — but the result is blocked and needs a human. See the escalations on the proof.'
-      : `Applied. Version ${revised.version} is ready.`;
+    // `revised` is the just-reserved row (status 'queued') — `revise()` now
+    // enqueues rather than waits, so whether it ends up blocked isn't known
+    // yet. The review page already polls `status` every 2s and switches to
+    // the blocked/ready UI itself once the queue worker finishes; this
+    // message only has to say the request was accepted.
+    const summary = `Applied — rendering version ${revised.version} now, this page will update automatically.`;
 
     return {
       agentMessage: await this.say(rootProofId, summary),

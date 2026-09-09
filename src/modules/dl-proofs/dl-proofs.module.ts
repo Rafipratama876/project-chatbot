@@ -1,11 +1,13 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { BullModule } from '@nestjs/bullmq';
 import { DatabaseModule } from '#/modules/database/database.module.js';
 import { DLGraphModule } from '#/modules/dl-graph/dl-graph.module.js';
 import { ArtworkModule } from '#/modules/artwork/artwork.module.js';
 import { WallPresetsModule } from '#/modules/wall-presets/wall-presets.module.js';
 import { LlmModule } from '#/modules/llm/llm.module.js';
 import { DLProofEntity, DLProofMessageEntity } from '#/modules/database/entities/dl-proof.entity.js';
+import { DL_PROOF_QUEUE } from '#/modules/queues/dl-proof.queue.js';
 import { DLProofsService } from './dl-proofs.service.js';
 import { DLProofsController } from './dl-proofs.controller.js';
 import { DLKnowledgeController } from './dl-knowledge.controller.js';
@@ -17,6 +19,11 @@ import { DLExportService } from './dl-export.service.js';
   imports: [
     DatabaseModule, DLGraphModule, ArtworkModule, WallPresetsModule, LlmModule,
     TypeOrmModule.forFeature([DLProofEntity, DLProofMessageEntity]),
+    // Self-contained registration — same pattern `ProofsModule`/`DesignsModule`
+    // already use for `PROOF_QUEUE`: the Redis connection itself comes from
+    // `BullModule.forRootAsync` in `QueuesModule` (process-wide, imported
+    // once by `AppModule`), so this needs no import of `QueuesModule`.
+    BullModule.registerQueue({ name: DL_PROOF_QUEUE }),
   ],
   controllers: [DLProofsController, DLKnowledgeController],
   providers: [DLProofsService, DLJobBuilderService, DLRevisionPatchService, DLExportService],

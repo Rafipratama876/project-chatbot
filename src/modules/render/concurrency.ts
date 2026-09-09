@@ -54,3 +54,56 @@ export async function mapWithConcurrency<T, R>(
 
   return results;
 }
+
+/**
+ * A counting semaphore — `acquire()` resolves once a slot is free, with a
+ * release callback; call it (once) when the held work is done.
+ *
+ * This is the cross-caller sibling to `mapWithConcurrency` above: that one
+ * bounds concurrency *within* a single list of items one caller owns.
+ * `RenderService` needs the other shape — CL's queue worker, and DL/SC's own
+ * new queue workers, are three independent callers that all happen to share
+ * one `RenderService` singleton (one Chromium `Browser`), and none of them
+ * knows about the others. A semaphore living on that shared instance is what
+ * makes "at most N renders in flight, no matter which product asked" true
+ * regardless of how many separate queues are dequeuing at once.
+ *
+ * Plain class, no dependency: same reasoning as `mapWithConcurrency` — a
+ * `for`/`Promise` shape anyone here can already read, not a second async
+ * paradigm to learn to review one call site.
+ */
+export class Semaphore {
+  private available: number;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(concurrency: number) {
+    if (!Number.isInteger(concurrency) || concurrency < 1) {
+      throw new Error(`semaphore concurrency must be a positive integer, got ${concurrency}`);
+    }
+    this.available = concurrency;
+  }
+
+  /** Resolves once a slot is free. Call the returned function exactly once to release it. */
+  async acquire(): Promise<() => void> {
+    if (this.available > 0) {
+      this.available -= 1;
+      return () => this.release();
+    }
+    return new Promise((resolve) => {
+      this.waiters.push(() => {
+        this.available -= 1;
+        resolve(() => this.release());
+      });
+    });
+  }
+
+  private release(): void {
+    this.available += 1;
+    // Handed straight to the next waiter rather than left for it to re-claim:
+    // two `release()`s back to back must wake two waiters, not the same one
+    // twice, which is what checking `available` again here would risk if a
+    // newcomer's `acquire()` interleaved between them.
+    const next = this.waiters.shift();
+    if (next) next();
+  }
+}

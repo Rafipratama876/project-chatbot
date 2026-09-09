@@ -24,17 +24,18 @@ export class SCProofsController {
 
   @Post('wizard')
   @ApiOperation({
-    summary: 'Build a Sign Cabinet job from the wizard (face graphic + wall box) and run it.',
+    summary: 'Build a Sign Cabinet job from the wizard (face graphic + wall box) and enqueue it.',
     description:
       'The SC equivalent of the Channel Letters/Dimensional Letters wizard\'s "Generate Proof" '
       + '— turns a face-graphic file and a wall-image box into measured artwork and a placement, '
-      + 'then runs the job through the SC gates. No draft is persisted first — the returned proof '
-      + 'is its own revision chain root.',
+      + 'then hands the job to the SC queue and returns immediately with a `queued` proof. '
+      + 'No draft is persisted first — the returned proof is its own revision chain root; poll '
+      + 'GET /root/:rootId/latest (what the review page already does) until it settles.',
   })
   async createFromWizard(@Body() body: CreateSCProofFromWizardDto): Promise<SCProofResponseDto> {
     const jobId = `sc-wizard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const job = await this.jobBuilder.build(body, jobId);
-    return SCProofResponseDto.from(await this.proofs.create(job, {
+    return SCProofResponseDto.from(await this.proofs.enqueue(job, {
       skipRender: body.skipRender, deterministicOnly: body.deterministicOnly,
     }));
   }

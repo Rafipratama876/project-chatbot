@@ -24,17 +24,18 @@ export class DLProofsController {
 
   @Post('wizard')
   @ApiOperation({
-    summary: 'Build a Dimensional Letters job from the wizard (logo + wall box) and run it.',
+    summary: 'Build a Dimensional Letters job from the wizard (logo + wall box) and enqueue it.',
     description:
       'The DL equivalent of the Channel Letters wizard\'s "Generate Proof" — turns a logo '
-      + 'file and a wall-image box into measured artwork and a placement, then runs the job '
-      + 'through the DL gates. No draft is persisted first (v1 has no dl_design table) — the '
-      + 'returned proof is its own revision chain root.',
+      + 'file and a wall-image box into measured artwork and a placement, then hands the job '
+      + 'to the DL queue and returns immediately with a `queued` proof. No draft is persisted '
+      + 'first (v1 has no dl_design table) — the returned proof is its own revision chain root; '
+      + 'poll GET /root/:rootId/latest (what the review page already does) until it settles.',
   })
   async createFromWizard(@Body() body: CreateDLProofFromWizardDto): Promise<DLProofResponseDto> {
     const jobId = `dl-wizard-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const job = await this.jobBuilder.build(body, jobId);
-    return DLProofResponseDto.from(await this.proofs.create(job, {
+    return DLProofResponseDto.from(await this.proofs.enqueue(job, {
       skipRender: body.skipRender, deterministicOnly: body.deterministicOnly,
     }));
   }

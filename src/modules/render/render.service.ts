@@ -7,9 +7,9 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { SignSpec } from '#/kb/domain/spec.js';
 import type { RenderedPanel } from '#/kb/render/browser-entry.js';
-import { verifyContract, buildRenderContract } from '#/kb/render/contract.js';
+import { verifyContract, buildRenderContract, type RenderContract } from '#/kb/render/contract.js';
 import { EnhanceService } from '#/modules/enhance/enhance.service.js';
-import { mapWithConcurrency } from './concurrency.js';
+import { mapWithConcurrency, Semaphore } from './concurrency.js';
 
 export interface RenderedProofPanel {
   label: string;
@@ -57,11 +57,22 @@ export class RenderService implements OnModuleDestroy {
   private browser: Browser | null = null;
   private bundle: string | null = null;
   private bundling: Promise<string> | null = null;
+  /**
+   * Caps total `render()` calls in flight at once, across every caller —
+   * Channel Letters' queue worker, Dimensional Letters' and Sign Cabinets'
+   * own queues. One shared `Browser` (software-rendered, see `headlessArgs`
+   * in render.config.ts) means one product's burst can starve another's if
+   * nothing bounds the total; each queue's own concurrency only bounds
+   * itself. See `render.globalConcurrency`'s own doc comment.
+   */
+  private readonly renderGate: Semaphore;
 
   constructor(
     private readonly config: ConfigService,
     private readonly enhance: EnhanceService,
-  ) {}
+  ) {
+    this.renderGate = new Semaphore(this.config.get<number>('render.globalConcurrency') ?? 2);
+  }
 
   async onModuleDestroy(): Promise<void> {
     await this.browser?.close();
@@ -97,6 +108,25 @@ export class RenderService implements OnModuleDestroy {
     const width = this.config.get<number>('render.width') ?? 1600;
     const height = this.config.get<number>('render.height') ?? 1000;
 
+    // Acquired before touching the browser at all: a caller waiting for a
+    // slot must not hold an open Chromium page while it waits — that would
+    // spend the exact resource the gate exists to ration.
+    const release = await this.renderGate.acquire();
+    try {
+      return await this.renderInner(spec, outDir, contract, width, height, options);
+    } finally {
+      release();
+    }
+  }
+
+  private async renderInner(
+    spec: SignSpec,
+    outDir: string,
+    contract: RenderContract,
+    width: number,
+    height: number,
+    options: { conceptScene?: boolean },
+  ): Promise<RenderedProofPanel[]> {
     const code = await this.getBundle();
     const browser = await this.getBrowser();
     const page = await browser.newPage({ viewport: { width, height } });

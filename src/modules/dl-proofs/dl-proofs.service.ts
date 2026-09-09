@@ -1,17 +1,18 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { InjectQueue } from '@nestjs/bullmq';
 import { Repository } from 'typeorm';
+import type { Queue } from 'bullmq';
 import { DLProofEntity, DLProofMessageEntity } from '#/modules/database/entities/dl-proof.entity.js';
 import { DLProofGraph, type DLGraphRunOptions } from '#/modules/dl-graph/dl-proof.graph.js';
 import { DLRevisionPatchService } from './dl-revision-patch.service.js';
 import type { DLJobInput } from '#/kb/domain/dl-spec.js';
 import { DL_VERSION } from '#/kb/domain/dl-boilerplate.js';
+import { DL_PROOF_QUEUE, type DLProofJobData } from '#/modules/queues/dl-proof.queue.js';
 
 /**
  * Persistence for Dimensional Letters proofs — the DL equivalent of
- * `ProofsService`, against `dl_proof` rather than `cl_proof`. No BullMQ
- * queue: DL jobs run synchronously, which is enough for the wizard's
- * submit-and-wait flow.
+ * `ProofsService`, against `dl_proof` rather than `cl_proof`.
  *
  * The revision loop mirrors CL's split across two layers, just without a
  * separate `dl_design` draft table: `revise` is the low-level, proof-to-proof
@@ -19,6 +20,14 @@ import { DL_VERSION } from '#/kb/domain/dl-boilerplate.js';
  * `ProofsService.revise` also does; `chat` is the conversational layer
  * (`DesignsService.revise` for CL) that logs the exchange and resolves
  * "the current proof" from `rootProofId` instead of a design id.
+ *
+ * `enqueue()` is what the wizard, `revise` and `regenerate` all actually use
+ * — the DL equivalent of `DesignsService.render()`'s own reserve-then-queue
+ * shape. `create()` is left as the synchronous, blocking implementation
+ * (Gate 1→6 AND the render AND any enhance call, all before returning) — it
+ * still exists deliberately, as what the raw, lower-level `POST /dl-proofs`
+ * endpoint uses, the same way CL's own `/proofs` defaults to synchronous.
+ * Nothing customer-facing calls `create()` any more.
  */
 @Injectable()
 export class DLProofsService {
@@ -29,6 +38,7 @@ export class DLProofsService {
     @InjectRepository(DLProofMessageEntity) private readonly messages: Repository<DLProofMessageEntity>,
     private readonly graph: DLProofGraph,
     private readonly revisions: DLRevisionPatchService,
+    @InjectQueue(DL_PROOF_QUEUE) private readonly queue: Queue<DLProofJobData>,
   ) {}
 
   async create(
@@ -38,6 +48,26 @@ export class DLProofsService {
   ): Promise<DLProofEntity> {
     const record = await this.reserve(job, lineage);
     return this.runInto(record.id, job, options);
+  }
+
+  /**
+   * Reserves the row and hands the actual gates+render+enhance work to
+   * `DLProofProcessor`, returning the moment the row exists — the id the
+   * caller polls from, not a finished proof. `DLReviewPage` already derives
+   * `inFlight` from `status` and already polls every 2s while it is
+   * `queued`/`running`, so nothing on the frontend had to change for this.
+   */
+  async enqueue(
+    job: DLJobInput,
+    options: DLGraphRunOptions = {},
+    lineage?: { rootProofId: string; version: number },
+  ): Promise<DLProofEntity> {
+    const reserved = await this.reserve(job, lineage);
+    await this.queue.add('render', {
+      proofId: reserved.id, job,
+      skipRender: options.skipRender, deterministicOnly: options.deterministicOnly,
+    }, { jobId: reserved.id });
+    return reserved;
   }
 
   async reserve(
@@ -108,7 +138,9 @@ export class DLProofsService {
    * The low-level revision: patch the FORM, re-run every gate, a new row.
    * The stored spec is never edited in place — a spec changed outside the
    * gates has not been validated by them, same reasoning as CL's own
-   * `ProofsService.revise`.
+   * `ProofsService.revise`. Enqueued, not awaited to completion — the chat
+   * "send message" action that calls this (via `chat()` below) must not
+   * block on a render.
    */
   async revise(id: string, request: string): Promise<DLProofEntity> {
     const previous = await this.findOne(id);
@@ -124,19 +156,19 @@ export class DLProofsService {
     const rootProofId = previous.rootProofId ?? previous.id;
     const version = await this.nextVersion(rootProofId);
     const jobId = `${previous.jobId}-r${version}`;
-    return this.create(
+    return this.enqueue(
       { ...previous.job, jobId, form: patch.form },
       {},
       { rootProofId, version },
     );
   }
 
-  /** Re-runs the exact same job as a new version — "Render ulang", no form change. */
+  /** Re-runs the exact same job as a new version — "Render ulang", no form change. Enqueued, same reasoning as `revise`. */
   async regenerate(rootProofId: string): Promise<DLProofEntity> {
     const latest = await this.latestInSeries(rootProofId);
     const version = await this.nextVersion(rootProofId);
     const jobId = `${latest.jobId}-re${version}`;
-    return this.create({ ...latest.job, jobId }, {}, { rootProofId, version });
+    return this.enqueue({ ...latest.job, jobId }, {}, { rootProofId, version });
   }
 
   async approve(id: string): Promise<DLProofEntity> {
@@ -196,9 +228,12 @@ export class DLProofsService {
       };
     }
 
-    const summary = revised.blocked
-      ? 'Applied — but the result is blocked and needs a human. See the escalations on the proof.'
-      : `Applied. Version ${revised.version} is ready.`;
+    // `revised` is the just-reserved row (status 'queued') — `revise()` now
+    // enqueues rather than waits, so whether it ends up blocked isn't known
+    // yet. The review page already polls `status` every 2s and switches to
+    // the blocked/ready UI itself once the queue worker finishes; this
+    // message only has to say the request was accepted.
+    const summary = `Applied — rendering version ${revised.version} now, this page will update automatically.`;
 
     return {
       agentMessage: await this.say(rootProofId, summary),

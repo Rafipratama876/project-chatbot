@@ -25,4 +25,16 @@ export default registerAs('render', () => ({
    * known to clear it.
    */
   panelEnhanceConcurrency: Number(process.env.RENDER_PANEL_ENHANCE_CONCURRENCY ?? 2),
+  /**
+   * Total `RenderService.render()` calls allowed in flight at once, across
+   * every caller — Channel Letters' queue worker, and Dimensional Letters'
+   * and Sign Cabinets' own (`queue.concurrency`). All three share one
+   * `RenderService` singleton (one headless Chromium `Browser`, software
+   * rendered — see `headlessArgs` above), so each queue capping only itself
+   * does not cap the total; this does. Same number `PROOF_CONCURRENCY`
+   * already uses, same reasoning, same resource — a render holds a
+   * Chromium page, and more than a few at once thrashes the CPU that has to
+   * rasterise all of them.
+   */
+  globalConcurrency: Number(process.env.RENDER_GLOBAL_CONCURRENCY ?? 2),
 }));
